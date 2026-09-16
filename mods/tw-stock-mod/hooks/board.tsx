@@ -724,10 +724,13 @@ function pnlLayout(width: number): PnlLayout {
   }
 }
 
-/** `張數`: qty/1000, one decimal only when it is not a whole 張 (e.g. `2` or `0.5`) */
+/**
+ * `張數`: qty/1000 with only the decimals it needs: `2`, `0.5`, and `0.01` for
+ * an odd lot of 10 shares (one decimal turned 10 shares into `0.0`).
+ */
 function qtyLabel(qty: number): string {
   const lots = qty / 1000
-  return Number.isInteger(lots) ? String(lots) : lots.toFixed(1)
+  return Number.isInteger(lots) ? String(lots) : lots.toFixed(3).replace(/0+$/, '')
 }
 
 function hhmmLocal(ms: number): string {
