@@ -898,6 +898,8 @@ type BoardProps = {
   source: 'demo' | 'file' | 'live'
   /** what the footer calls the source; '' lets the board name it from `source` */
   sourceLabel: string
+  /** the plugin's own version, read from its manifest; '' when it could not be */
+  version: string
   highlight: boolean
   sorted: boolean
   /** 1 = single-column table, 2 = two symbols a row; see effectiveColumns() */
@@ -1051,6 +1053,7 @@ function buildProps(
         : [{ name: conf.indexName, value: idxValue, change: idxChange, pct: idxPct }],
     source: usedFile ? (quotesFile?.origin ?? 'file') : 'demo',
     sourceLabel: usedFile ? (quotesFile?.sourceLabel ?? '') : '',
+    version,
     highlight: cfg.highlight,
     sorted: cfg.sort === 'change',
     columns,
@@ -1098,6 +1101,13 @@ let focus = 0
 // checked against something real: a Client's post is code's word, not the
 // engine's, and focus is read straight into props.quotes[focus].
 let shownCount = 0
+// The band draws from a COPY of this plugin under
+// ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/, frozen at install
+// time - editing the working tree changes nothing until `claude plugin update`
+// and a restart. So "which build am I looking at" is a real question, and the
+// footer answers it: this is read from the manifest that shipped beside the
+// code actually running, not from a constant that can drift from it.
+let version = ''
 
 // --- paging ----------------------------------------------------------------
 // A watchlist longer than five symbols is shown one page at a time. The page
@@ -1266,6 +1276,13 @@ const RIGHT_BUTTON_GROUP_COLS = 40
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const r = await next(e)
+
+    try {
+      const manifest = JSON.parse(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`))
+      if (typeof manifest?.version === 'string') version = `v${manifest.version}`
+    } catch {
+      // a band that cannot name its version still draws prices
+    }
 
     // Both files are optional and most sessions have neither, but the host logs
     // every failed $.fs.read at ERROR level - so polling them every few seconds

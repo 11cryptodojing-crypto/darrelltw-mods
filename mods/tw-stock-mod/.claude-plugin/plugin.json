@@ -1,6 +1,6 @@
 {
   "name": "tw-stock-mod",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Watchlist band above the Claude Code prompt: Taiwan hours show the Taiwan list (紅漲綠跌), US hours show the US list (綠漲紅跌), in a broker-style table with a Solari split-flap footer. 20 symbols a market, 10 on screen at a time. Live prices from Yahoo by default, no key and no account; 證交所 MIS and a quotes-file override are one config line away. Needs function hooks (early access) and an interactive terminal. Zero model tokens.",
   "author": {
     "name": "Darrell Wang",

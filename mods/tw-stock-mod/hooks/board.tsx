@@ -54,6 +54,8 @@ export type BoardProps = {
   source: 'demo' | 'file' | 'live'
   /** what the footer calls the source; '' falls back to naming it from `source` */
   sourceLabel: string
+  /** the plugin's version, e.g. `v0.4.1`; '' hides it */
+  version: string
   /** snapshot counter; the live dot flips on it (0 while faking prices) */
   seq: number
   highlight: boolean
@@ -867,15 +869,19 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
   const quotes = props.quotes.slice(0, MAX_TABLE_QUOTES)
   // the feed names itself - 證交所 即時 and Yahoo 即時 are not the same claim -
   // and only a source that did not say falls back to a generic label
-  const sourceTag =
+  const sourceName =
     props.source === 'demo'
       ? '示範資料（未接 API）'
       : props.sourceLabel || (props.source === 'live' ? '即時報價' : '報價檔')
+  // The version rides with the source tag so a wide band answers "which build
+  // is this" without being asked, and a narrow one drops it first: which
+  // prices you are looking at still matters more than which build drew them.
+  const sourceTag = props.version ? `${sourceName} · ${props.version}` : sourceName
   // The demo tag is the longest thing this row ever carries, and it is the one
   // whose full form is optional: `示範資料` already says the prices are fake,
   // the parenthetical only says why. Shortening it buys eight columns of air
   // between the index block and the tail before anything has to be dropped.
-  const sourceTagShort = props.source === 'demo' ? '示範資料' : sourceTag
+  const sourceTagShort = props.source === 'demo' ? '示範資料' : sourceName
   // The band signs itself in the bottom-right corner. On a row too tight for
   // both, the data source wins: which prices you are looking at matters more
   // than who wrote the thing drawing them.
