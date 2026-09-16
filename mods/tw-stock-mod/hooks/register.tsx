@@ -1742,7 +1742,11 @@ export const register: Register = on => {
   // `data` came from code, so it is input to validate, not a fact - hence the
   // bounds check against the board that was actually drawn.
   on('ui.message', async ($, e, next) => {
-    if (e.element !== 'stock-band:table' || e.module !== './board.tsx') return next(e)
+    // `e.module` is the path under the plugin folder (`hooks/board.tsx`), NOT
+    // the `./board.tsx` literal the Client prop carries. Comparing it against
+    // the prop threw every message away in silence: the pointer fired, the hit
+    // test matched, the post went out, and this hook dropped it.
+    if (e.element !== 'stock-band:table' || !e.module.endsWith('board.tsx')) return next(e)
     const pick = (e.data as { pick?: unknown } | null)?.pick
     if (typeof pick !== 'number' || !Number.isInteger(pick) || pick < 0 || pick >= shownCount) {
       return next(e)
