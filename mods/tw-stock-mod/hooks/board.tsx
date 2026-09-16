@@ -641,9 +641,18 @@ function fitsTwoColumns(width: number): boolean {
 }
 
 // --- candle panel ----------------------------------------------------------
-// Two pixel rows per terminal row via half-block characters, the same trick
-// the deploy band uses for Clawd: a cell with both halves lit is '▀' with the
-// top color as fg and the bottom color as bg.
+// Real candles: a body character and a wick character, each owning a whole
+// terminal row. The first version packed both into half-block cells to buy ten
+// levels of vertical resolution instead of five - and lost the candle. A cell
+// is either "top half lit" or "bottom half lit", so a one-row body and the
+// wick above it landed in the same cell and merged into one blob; the user's
+// verdict was "看不出來那是 K 棒", and he was right. Five levels that read as
+// candles beat ten that read as noise.
+//
+// The wick shares the body's column rather than sitting beside it: with a
+// one-column body they line up exactly, which is what the user picked over
+// wider bodies ("那條線不能置中，看起來好煩" - a 2-column body puts the wick
+// on one side of it).
 const CHART_PLOT_ROWS = 5 // -> 10 pixel rows of vertical resolution. One row
 // fewer than the table's five quotes plus header and rule, so that the chart's
 // own title row (which names the symbol) fits without the band growing.
@@ -662,45 +671,56 @@ type Candles = { rows: Cell[][]; hi: number; lo: number }
 function candleCells(bars: Bar[], market: MarketId, prevClose: number, width: number, dim: boolean): Candles {
   const empty: Candles = { rows: Array.from({ length: CHART_PLOT_ROWS }, () => []), hi: 0, lo: 0 }
   if (bars.length === 0 || width <= 0) return empty
+
+  // One candle every BAR_STRIDE columns, so the number of candles follows the
+  // terminal's width rather than the feed's bar count: a day of 5-minute bars
+  // is ~79 of them, and drawing 79 into 31 slots is what made the old panel a
+  // solid block. Each slot is a real OHLC merge of the bars it covers, so the
+  // highs and lows survive the aggregation.
+  const slots = Math.max(1, Math.min(bars.length, Math.floor((width + 1) / BAR_STRIDE)))
+  const merged: Bar[] = []
+  for (let i = 0; i < slots; i++) {
+    const from = Math.floor((i * bars.length) / slots)
+    const to = Math.max(from + 1, Math.floor(((i + 1) * bars.length) / slots))
+    let [o, h, l, c] = bars[from]
+    for (let j = from; j < to; j++) {
+      const [, bh, bl, bc] = bars[j]
+      if (bh > h) h = bh
+      if (bl < l) l = bl
+      c = bc
+    }
+    merged.push([o, h, l, c])
+  }
+
   let hi = prevClose
   let lo = prevClose
-  for (const [, h, l] of bars) {
+  for (const [, h, l] of merged) {
     if (h > hi) hi = h
     if (l < lo) lo = l
   }
   const span = hi - lo || 1
-  const pixRows = CHART_PLOT_ROWS * 2
-  const toPix = (price: number) => Math.round(((hi - price) / span) * (pixRows - 1))
+  const toRow = (price: number) =>
+    Math.min(CHART_PLOT_ROWS - 1, Math.max(0, Math.round(((hi - price) / span) * (CHART_PLOT_ROWS - 1))))
 
-  // pixel grid: undefined = empty, otherwise the color to light it with
-  const grid: (string | undefined)[][] = Array.from({ length: pixRows }, () => Array<string | undefined>(width).fill(undefined))
-  const prevPix = toPix(prevClose)
-  // the previous close as a faint reference line, drawn under the candles
-  for (let c = 0; c < width; c++) grid[prevPix][c] = PREV_LINE
-  for (let i = 0; i < bars.length; i++) {
+  const rows: Cell[][] = Array.from({ length: CHART_PLOT_ROWS }, () =>
+    Array.from({ length: width }, () => ({ ch: ' ' }) as Cell),
+  )
+  // the previous close as a faint dotted reference, drawn first so a candle
+  // that crosses it paints over
+  const prevRow = toRow(prevClose)
+  for (let c = 0; c < width; c++) rows[prevRow][c] = { ch: '┈', fg: PREV_LINE }
+
+  for (let i = 0; i < merged.length; i++) {
     const c = i * BAR_STRIDE
     if (c >= width) break
-    const [o, h, l, cl] = bars[i]
+    const [o, h, l, cl] = merged[i]
     const body = dim ? GRAY : cl === o ? FLAT : tone(market, cl - o)
     const wick = darken(body)
-    for (let r = toPix(h); r <= toPix(l); r++) grid[r][c] = wick
-    for (let r = toPix(Math.max(o, cl)); r <= toPix(Math.min(o, cl)); r++) grid[r][c] = body
+    for (let r = toRow(h); r <= toRow(l); r++) rows[r][c] = { ch: '│', fg: wick }
+    for (let r = toRow(Math.max(o, cl)); r <= toRow(Math.min(o, cl)); r++) rows[r][c] = { ch: '█', fg: body }
   }
 
-  const rows: Cell[][] = []
-  for (let j = 0; j < CHART_PLOT_ROWS; j++) {
-    const cells: Cell[] = []
-    for (let c = 0; c < width; c++) {
-      const top = grid[2 * j][c]
-      const bot = grid[2 * j + 1][c]
-      if (!top && !bot) cells.push({ ch: ' ' })
-      else if (!top) cells.push({ ch: '\u2584', fg: bot })
-      else if (!bot) cells.push({ ch: '\u2580', fg: top })
-      else cells.push({ ch: '\u2580', fg: top, bg: bot })
-    }
-    cells.push({ ch: ' ' })
-    rows.push(cells)
-  }
+  for (const row of rows) row.push({ ch: ' ' })
   return { rows, hi, lo }
 }
 

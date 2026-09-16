@@ -1,0 +1,94 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+TC:wght@400;500;600;700&display=swap">
+  <style>
+    body { margin: 0; }
+    a { color: #c8a45c; } a:hover { color: #a8863f; }
+  </style>
+</helmet>
+<div style="background:#141009; color:#c9c3b0; font-family:'IBM Plex Sans TC', -apple-system, sans-serif; width:1100px; box-sizing:border-box; padding:72px 96px; display:flex; flex-direction:column;">
+
+  <div style="display:flex; flex-direction:column; gap:14px; margin-bottom:48px; max-width:900px;">
+    <div style="font-family:'SF Mono','Menlo','DejaVu Sans Mono',ui-monospace,monospace; font-size:12px; letter-spacing:0.14em; text-transform:uppercase; color:#8f8770;">tw-stock-mod ・ chart style comparison</div>
+    <h1 style="margin:0; font-size:32px; line-height:1.3; font-weight:700; color:#f4efe0; letter-spacing:0.01em;">5 行 × 62 欄能畫出看得懂的走勢嗎</h1>
+    <div style="font-family:'SF Mono','Menlo','DejaVu Sans Mono',ui-monospace,monospace; font-size:13px; color:#a89f8c; letter-spacing:0.02em;">5 文字列・62 欄・79 根 5 分 K・昨收 358.97</div>
+  </div>
+
+  <div style="display:flex; flex-direction:column; gap:56px; max-width:900px;">
+    
+    <div style="display:flex; flex-direction:column; gap:16px;">
+      <div style="display:flex; align-items:baseline; gap:14px;">
+        <span style="display:inline-block; padding:3px 10px; border:1px solid rgba(200,164,92,0.4); border-radius:2px; font-family:'SF Mono','Menlo','DejaVu Sans Mono',ui-monospace,monospace; font-size:12px; letter-spacing:0.04em; color:#c8a45c; flex-shrink:0;">現況</span>
+        <span style="font-size:19px; font-weight:600; color:#f0ead8; letter-spacing:0.01em;">半形方塊 K 棒，垂直 10 級、水平 62 取樣</span>
+      </div>
+      <div style="display:inline-block; background:#1b160e; border:1px solid rgba(200,164,92,0.22); border-radius:3px; padding:18px 20px; box-sizing:border-box;"><pre style="margin:0; white-space:pre; font-family:'SF Mono','Menlo','DejaVu Sans Mono',ui-monospace,monospace; font-size:13px; line-height:1.15; letter-spacing:0; color:#e7ddc4;"> ▄██▄             █▄  ██▄█▄ ▄▄▄ ▄                             
+██▀▀██▄▄▄▄▄    ▄▄█████▀▀▀▀▀█▀▀████▄▄█▄▄                       
+██  ▀▀█▀▀▀███ ██▀▀             ▀ ▀▀▀ ▀█ ▄ ▄▄▄▄▄▄▄▄ ▄▄         
+██          ▀██                       ██▀▀█▀ ▀▀ ▀▀▀▀▀▀██▄▄▄ ▄█
+▀                                      ▀                 ▀█▀█ </pre></div>
+      <div style="display:flex; flex-direction:column; gap:10px;">
+        <div style="display:flex; gap:24px; align-items:baseline;"><div style="flex:0 0 108px; font-size:12px; font-weight:600; letter-spacing:0.08em; color:#8f8770; text-transform:uppercase; padding-top:2px;">讀起來是什麼</div><div style="flex:1; font-size:15px; line-height:1.65; color:#c9c3b0;">79 根 K 棒硬塞進 62 欄、10 級垂直解析度，線形糊成一團色塊，看不出開高走低，也認不出任何一根 K 棒的位置。</div></div>
+      </div>
+    </div>
+    
+    
+    <div style="display:flex; flex-direction:column; gap:16px;">
+      <div style="display:flex; align-items:baseline; gap:14px;">
+        <span style="display:inline-block; padding:3px 10px; border:1px solid rgba(200,164,92,0.4); border-radius:2px; font-family:'SF Mono','Menlo','DejaVu Sans Mono',ui-monospace,monospace; font-size:12px; letter-spacing:0.04em; color:#c8a45c; flex-shrink:0;">選項 1</span>
+        <span style="font-size:19px; font-weight:600; color:#f0ead8; letter-spacing:0.01em;">Braille 折線</span>
+      </div>
+      <div style="display:inline-block; background:#1b160e; border:1px solid rgba(200,164,92,0.22); border-radius:3px; padding:18px 20px; box-sizing:border-box;"><pre style="margin:0; white-space:pre; font-family:'SF Mono','Menlo','DejaVu Sans Mono',ui-monospace,monospace; font-size:13px; line-height:1.15; letter-spacing:0; color:#e7ddc4;"> ⡤⣤⢤             ⢠⢤   ⡖⣆⡤⢤⣀⣀⣠⢤⡀⢀⣀                             
+ ⡇ ⠈⣇⣤ ⢀⡀⣀     ⡤⣴⠚⠈⠉⠿⠉⠁  ⠈⠁⠉  ⠓⣾⠈⡇⣀⣰⢲⣀⡀                       
+ ⡇   ⠘⠚⠉⠉⠉⠙⣆⡀⢀⣠⠇                 ⠉⠁   ⡇⢀⣀ ⣀⣀⣀⣀⣠⢤⡀             
+ ⡇          ⠉⠿                        ⠙⠚⠈⠉⠁     ⠉⠙⠒⠚⠉⠹⠴⣆⣀⡀  ⣰⠒
+⠉⠁                                                       ⠹⠴⠋⠁ </pre></div>
+      <div style="display:flex; flex-direction:column; gap:10px;">
+        <div style="display:flex; gap:24px; align-items:baseline;"><div style="flex:0 0 108px; font-size:12px; font-weight:600; letter-spacing:0.08em; color:#8f8770; text-transform:uppercase; padding-top:2px;">讀起來是什麼</div><div style="flex:1; font-size:15px; line-height:1.65; color:#c9c3b0;">一條連續的走勢線，跟券商 App 的日內走勢圖同一種讀法。Braille 點字每格 2×4 點，垂直解析度從 10 級變成 20 級，水平取樣從 62 變成 124。</div></div><div style="display:flex; gap:24px; align-items:baseline;"><div style="flex:0 0 108px; font-size:12px; font-weight:600; letter-spacing:0.08em; color:#8f8770; text-transform:uppercase; padding-top:2px;">代價</div><div style="flex:1; font-size:15px; line-height:1.65; color:#c9c3b0;">需要終端機字型有 Braille 字符（U+2800 區段）。多數開發用字型有，但不是全部；缺字時會變成豆腐方塊。看不到單根 K 棒的高低開收。</div></div>
+      </div>
+    </div>
+    
+    
+    <div style="display:flex; flex-direction:column; gap:16px;">
+      <div style="display:flex; align-items:baseline; gap:14px;">
+        <span style="display:inline-block; padding:3px 10px; border:1px solid rgba(200,164,92,0.4); border-radius:2px; font-family:'SF Mono','Menlo','DejaVu Sans Mono',ui-monospace,monospace; font-size:12px; letter-spacing:0.04em; color:#c8a45c; flex-shrink:0;">選項 2</span>
+        <span style="font-size:19px; font-weight:600; color:#f0ead8; letter-spacing:0.01em;">Braille 面積</span>
+      </div>
+      <div style="display:inline-block; background:#1b160e; border:1px solid rgba(200,164,92,0.22); border-radius:3px; padding:18px 20px; box-sizing:border-box;"><pre style="margin:0; white-space:pre; font-family:'SF Mono','Menlo','DejaVu Sans Mono',ui-monospace,monospace; font-size:13px; line-height:1.15; letter-spacing:0; color:#e7ddc4;"> ⣤⣠⡄             ⢠⡄   ⣶⣀⣤⡄⣀⢀⣠⣄ ⢀⡀                             
+ ⣿⣿⣿⣀⡄ ⢀ ⡀     ⣤⣰⣾⣿⣿⣼⣿⣿⣿⣿⣿⣿⣿⣿⣿⣶⣸⣿ ⣀⣰⣆⣀                        
+⣿⠉⠉⠉⠉⠙⠋⠉⠉⠉⠙⣿⣿⣿⡿⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉⣿⣿⣿⣿⣿⣿⣿⣿⡿⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿           ⠉⠇                        ⠙⠃⠈⠉      ⠉⠙⠛⠋⠉⠹⠟⣿⣿⣿⣿⣿⡟⠛
+⠉                                                        ⠹⠟⠉  </pre></div>
+      <div style="display:flex; flex-direction:column; gap:10px;">
+        <div style="display:flex; gap:24px; align-items:baseline;"><div style="flex:0 0 108px; font-size:12px; font-weight:600; letter-spacing:0.08em; color:#8f8770; text-transform:uppercase; padding-top:2px;">讀起來是什麼</div><div style="flex:1; font-size:15px; line-height:1.65; color:#c9c3b0;">同一條線，但從昨收那條水平線填滿到價格。高於昨收的時段和低於昨收的時段各自成為一塊實心區域，漲跌一眼分明，不用先找基準線在哪。</div></div><div style="display:flex; gap:24px; align-items:baseline;"><div style="flex:0 0 108px; font-size:12px; font-weight:600; letter-spacing:0.08em; color:#8f8770; text-transform:uppercase; padding-top:2px;">代價</div><div style="flex:1; font-size:15px; line-height:1.65; color:#c9c3b0;">跟選項 1 一樣需要 Braille 字型。填滿後線本身的細節被吃掉，適合看「今天是紅是綠」，不適合看轉折。</div></div>
+      </div>
+    </div>
+    
+    
+    <div style="display:flex; flex-direction:column; gap:16px;">
+      <div style="display:flex; align-items:baseline; gap:14px;">
+        <span style="display:inline-block; padding:3px 10px; border:1px solid rgba(200,164,92,0.4); border-radius:2px; font-family:'SF Mono','Menlo','DejaVu Sans Mono',ui-monospace,monospace; font-size:12px; letter-spacing:0.04em; color:#c8a45c; flex-shrink:0;">選項 3</span>
+        <span style="font-size:19px; font-weight:600; color:#f0ead8; letter-spacing:0.01em;">昨收落差柱</span>
+      </div>
+      <div style="display:inline-block; background:#1b160e; border:1px solid rgba(200,164,92,0.22); border-radius:3px; padding:18px 20px; box-sizing:border-box;"><pre style="margin:0; white-space:pre; font-family:'SF Mono','Menlo','DejaVu Sans Mono',ui-monospace,monospace; font-size:13px; line-height:1.15; letter-spacing:0; color:#e7ddc4;"> ▄▄                   █▄▄   ▄▄                                
+ ███▄▄ ▄ ▄     ▄▄███▄██████████▄█ ▄▄▄                         
+█▀▀▀▀▀▀▀▀▀▀████▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀████████████████████████
+█           ▀█                        ▀▀▀▀      ▀▀▀▀▀▀▀██████▀
+                                                          ▀▀  </pre></div>
+      <div style="display:flex; flex-direction:column; gap:10px;">
+        <div style="display:flex; gap:24px; align-items:baseline;"><div style="flex:0 0 108px; font-size:12px; font-weight:600; letter-spacing:0.08em; color:#8f8770; text-transform:uppercase; padding-top:2px;">讀起來是什麼</div><div style="flex:1; font-size:15px; line-height:1.65; color:#c9c3b0;">以昨收為零軸，每一欄畫一根從零軸長出來的柱子，往上是漲往下是跌。只用半形方塊，沒有字型風險。</div></div><div style="display:flex; gap:24px; align-items:baseline;"><div style="flex:0 0 108px; font-size:12px; font-weight:600; letter-spacing:0.08em; color:#8f8770; text-transform:uppercase; padding-top:2px;">代價</div><div style="flex:1; font-size:15px; line-height:1.65; color:#c9c3b0;">垂直解析度仍然是 10 級。價格整天都在昨收同一側時，柱子會塞滿半張圖，形狀變得不明顯。</div></div>
+      </div>
+    </div>
+    
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>
