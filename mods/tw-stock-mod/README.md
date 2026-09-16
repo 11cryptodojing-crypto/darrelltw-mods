@@ -194,6 +194,15 @@ once — enter the view, step forward, and fall out to the table on the last
 symbol — which left no way back to the symbol you had just passed and no exit
 except walking to the end of the list.
 
+**Or click the row.** Clicking a quote in the table opens that symbol's chart
+directly, so reaching the tenth symbol costs one click rather than ten presses.
+The whole half-row is the target, not just the four characters of the code. A
+`Client` has no `Button`, so the board hit-tests the pointer itself and posts
+the row back to the hook module (`surface.onPointer` → `surface.post` →
+`ui.message`). Clicking is an addition, not a replacement: the table is not on
+screen once the chart is up, so the three buttons remain the only way to move
+between symbols from there.
+
 ## Configure
 
 Everything has a default; the band works with no config at all. To change the

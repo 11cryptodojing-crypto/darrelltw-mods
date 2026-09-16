@@ -1094,6 +1094,10 @@ let snoozedUntil = 0
 // table, so one button covers both "show me the chart" and "next symbol"
 let view: View = 'table'
 let focus = 0
+// how many quotes the last drawn board held, so a posted row index can be
+// checked against something real: a Client's post is code's word, not the
+// engine's, and focus is read straight into props.quotes[focus].
+let shownCount = 0
 
 // --- paging ----------------------------------------------------------------
 // A watchlist longer than five symbols is shown one page at a time. The page
@@ -1624,6 +1628,7 @@ export const register: Register = on => {
       $.ui.invalidate('ui.render')
     }
     const rowCount = props.quotes.length
+    shownCount = rowCount
     const onPage = () => {
       setPage((props.page + 1) % props.pageCount, now)
       $.ui.invalidate('ui.render')
@@ -1721,5 +1726,25 @@ export const register: Register = on => {
         {await next(e)}
       </Box>
     )
+  })
+
+  // Clicking a quote in the table opens its trend chart. The board hit-tests
+  // the pointer (a Client has no Button) and posts the row it landed on; this
+  // is the other end of that. It is a shortcut, not a replacement: the table
+  // is not on screen in chart view, so 上一檔 / 下一檔 / 回清單 stay the only
+  // way to move once the chart is up.
+  //
+  // `data` came from code, so it is input to validate, not a fact - hence the
+  // bounds check against the board that was actually drawn.
+  on('ui.message', async ($, e, next) => {
+    if (e.element !== 'stock-band:table' || e.module !== './board.tsx') return next(e)
+    const pick = (e.data as { pick?: unknown } | null)?.pick
+    if (typeof pick !== 'number' || !Number.isInteger(pick) || pick < 0 || pick >= shownCount) {
+      return next(e)
+    }
+    view = 'chart'
+    focus = pick
+    $.ui.invalidate('ui.render')
+    return {}
   })
 }

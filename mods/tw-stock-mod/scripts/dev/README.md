@@ -32,6 +32,7 @@ one with just a config in it.
 | `switch.mjs` | does pressing `m` fetch the market it lands on | `node switch.mjs $OUT/register.js <config.json>` |
 | `page-reset.mjs` | does pressing 翻頁 push the auto-page deadline out | `node page-reset.mjs $OUT/register.js <proj> <press-at-ms>` |
 | `chart-nav.mjs` | do 上一檔／下一檔／回清單 move the focus and wrap | `node chart-nav.mjs $OUT/register.js <proj>` |
+| `click-to-chart.mjs` | does clicking a table row open that symbol's chart | `node click-to-chart.mjs $OUT/board.js $OUT/register.js <proj> [columns]` |
 | `feed-idle.mjs` | does a closed market stop being polled, and does its snapshot still hold | `node feed-idle.mjs $OUT/register.js <proj>` |
 | `feed-open-snooze.mjs` | does an open market still get polled, and does 收起 stop it | `node feed-open-snooze.mjs $OUT/register.js <proj>` |
 

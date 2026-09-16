@@ -439,6 +439,15 @@ function stillFrameId(t: number, st: State): string {
 type FrameClock = { ms: number; cancel: () => void }
 const frameClocks = new WeakMap<object, FrameClock>()
 
+// Clicking a quote opens its trend chart. A Client has no Button, so the board
+// hit-tests the pointer itself: the render writes down which quote each cell
+// belongs to, and the listener reads that map. The two are split because they
+// live on different clocks - the listener is installed once per instance and
+// outlives every page turn under it, so it must not close over one render's
+// rows or a click would open the symbol that used to be there.
+type Picker = { hit: (x: number, y: number) => number | undefined }
+const pickers = new WeakMap<object, Picker>()
+
 // The table view lost its title row: the market name, session state and
 // hours moved into the button row register.tsx draws above this Client (that
 // row also carries the market button now), so the table starts straight at
@@ -760,6 +769,23 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     return <Text dimColor>stock-band: waiting for quotes</Text>
   }
 
+  // One listener per instance, for the same lifetime reason the frame clock
+  // has one: onPointer keeps a single listener, and a remounted board gets a
+  // fresh entry. Only a left press picks - a drag, a right button and the
+  // hover moves all fall through, so the row under the pointer is the row the
+  // user aimed at.
+  let picker = pickers.get(surface)
+  if (!picker) {
+    const own: Picker = { hit: () => undefined }
+    pickers.set(surface, own)
+    picker = own
+    surface.onPointer(e => {
+      if (e.type !== 'down' || e.button !== 'left') return
+      const index = own.hit(e.x, e.y)
+      if (index !== undefined) surface.post({ pick: index })
+    })
+  }
+
   // A page turn changes the symbols as well as the numbers, so its wave has the
   // whole row to cross and gets the longer budget.
   const isPageTurn = props.quotes.some(q => q.was?.code !== undefined)
@@ -906,6 +932,9 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     // aligned and named for what they do, so this line no longer has to
     // explain that one button means three things.
     signOff(foot, lay.pctRight)
+    // the table is not on screen here, so there is nothing under the pointer
+    // to pick; the named buttons above the band move between symbols instead
+    picker.hit = () => undefined
   } else {
     // row 0: column headers. row 1: rule. The market name, session state,
     // hours and market clock used to open this view as its own title row;
@@ -918,6 +947,19 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     // for two - see fitsTwoColumns.
     const halves = props.columns === 2 && fitsTwoColumns(surface.columns || 80) ? layout2(surface.columns || 80) : undefined
     const pctRight = halves ? halves[1].pctRight : lay.pctRight
+
+    // rows 2..6 hold the quotes; row 0 is the header and row 1 the rule. In
+    // two-column mode the left half owns everything up to its 變更% column and
+    // the right half the rest, so the gutter between them belongs to the left
+    // row rather than to nothing. A width-triggered fallback to one column
+    // draws only the first five, so only those five can be picked.
+    const pickable = halves ? quotes.length : Math.min(quotes.length, TABLE_QUOTE_ROWS)
+    picker.hit = (x, y) => {
+      const row = y - 2
+      if (row < 0 || row >= TABLE_QUOTE_ROWS) return undefined
+      const index = halves && x > halves[0].pctRight ? row + TABLE_QUOTE_ROWS : row
+      return index < pickable ? index : undefined
+    }
 
     const head = rows[0]
     if (halves) {
