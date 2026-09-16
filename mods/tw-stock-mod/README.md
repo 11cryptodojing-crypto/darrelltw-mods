@@ -373,9 +373,21 @@ left out, so a typo costs one missing index rather than the whole footer.
   there claimed a freshness the prices did not have. It now prints Yahoo's
   `regularMarketTime`, and the live dot flips once per snapshot the feed
   accepted — a dead feed leaves both frozen instead of animating.
-- **A failed fetch never becomes a made-up price.** The last good snapshot
-  stands for 120 seconds, then the band falls back to the demo walk and the
-  footer tag changes back to 示範資料.
+- **A failed fetch never becomes a made-up price.** While the market trades,
+  the last good snapshot stands for 120 seconds, then the band falls back to
+  the demo walk and the footer tag changes back to 示範資料. Once the market
+  closes that rule is dropped: a snapshot taken after the close stays true
+  until the next session, because the price it holds cannot change.
+
+- **A closed market is not polled.** One fetch after the close captures the
+  closing price and then the feed goes quiet until the market opens again —
+  the countdown in the footer disappears with it, rather than counting down to
+  a request that never comes. Left open overnight the band used to spend about
+  1,900 requests re-reading a number that had stopped moving, against a keyless
+  endpoint that answers 429 and bans for minutes.
+
+- **Snoozing stops the feed too.** `收起 30 分` takes the table off screen, so
+  those 30 minutes need no prices.
 
 - **The request budget is enforced, not just the interval.** `feedMs` alone
   cannot bound the rate once a tick costs more than one request, so the feed

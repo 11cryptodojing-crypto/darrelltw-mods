@@ -293,6 +293,12 @@ function minutesSinceClose(now: number, market: MarketId): number {
   return days * 1440 - conf.close + minutes
 }
 
+/** when this market last closed, as a timestamp - minutesSinceClose walks back
+ * over the weekend for us, so this is a real moment on any day of the week */
+function lastCloseAt(now: number, market: MarketId): number {
+  return now - minutesSinceClose(now, market) * 60_000
+}
+
 function hhmm(minutesFromMidnight: number): string {
   return `${pad2(Math.floor(minutesFromMidnight / 60))}:${pad2(minutesFromMidnight % 60)}`
 }
@@ -1029,7 +1035,10 @@ function buildProps(
     pageCount: pages,
     // the board counts this down on its own clock; 0 means nothing is fetching
     // and the board then shows no countdown rather than a stuck number
-    nextFeedAt: cfg.feed === 'off' || !quotesFile || quotesFile.origin !== 'live' ? 0 : nextFeedAt,
+    nextFeedAt:
+      cfg.feed === 'off' || !quotesFile || quotesFile.origin !== 'live' || !marketNeedsFeed(now, market)
+        ? 0
+        : nextFeedAt,
     animation: cfg.animation,
     countdown: cfg.countdown,
     quotes: shown,
@@ -1144,13 +1153,41 @@ function setPage(next: number, now: number) {
   turnSeq += 1
 }
 
+/**
+ * Whether a snapshot still describes the market. While it trades, two minutes
+ * without a new price means the feed died and the band has to say so rather
+ * than keep drawing a price nobody is quoting. Once the market closes the
+ * price cannot change, so a snapshot taken after the close stays true until
+ * the next session - expiring it on the same two-minute rule would throw away
+ * a real closing price and draw the demo walk over it.
+ */
+function snapshotHolds(asOf: number, now: number, market: MarketId): boolean {
+  if (phaseOf(now, market) === 'open') return now - asOf <= QUOTE_STALE_MS
+  return asOf >= lastCloseAt(now, market)
+}
+
+/**
+ * Whether this market is worth a request right now. A closed market answers
+ * the same closing price every time, so the run costs nothing but the ban
+ * risk: one fetch after the close captures it and the rest are waste. At 30 s
+ * a tick and two requests a tick, a watchlist left open overnight used to
+ * spend about 1,900 requests re-reading a number that had stopped moving.
+ */
+function marketNeedsFeed(now: number, market: MarketId): boolean {
+  if (phaseOf(now, market) === 'open') return true
+  const snap = liveBy[market]
+  // never fetched, or the snapshot predates the close and so is not the
+  // closing price yet
+  return !snap || snap.file.asOf < lastCloseAt(now, market)
+}
+
 // The quotes file wins over the feed: it is the explicit override. A market
 // with no snapshot falls back to the demo walk, which is what the footer's
 // 示範資料 tag is for.
 function quotesFor(market: MarketId, now: number): QuotesFile | undefined {
   if (lastFile && (!lastFile.market || lastFile.market === market)) return lastFile
   const snap = liveBy[market]
-  if (!snap || now - snap.file.asOf > QUOTE_STALE_MS) return undefined
+  if (!snap || !snapshotHolds(snap.file.asOf, now, market)) return undefined
   const quotes: Record<string, FileQuote> = {}
   for (const [code, quote] of Object.entries(snap.file.quotes)) {
     const bars = liveBars[`${market}:${code}`]
@@ -1462,7 +1499,10 @@ export const register: Register = on => {
 
     const feed = async () => {
       const now = await $.clock.now()
-      if (config.feed === 'off' || now < feedSkipUntil || feedInFlight) return
+      // Snoozed means the table is not on screen at all, so the 30 minutes it
+      // covers need no prices; a 429 sets feedSkipUntil; feedInFlight keeps a
+      // slow answer from stacking a second request on top of it.
+      if (config.feed === 'off' || now < snoozedUntil || now < feedSkipUntil || feedInFlight) return
       feedInFlight = true
       try {
         await feedOnce(now)
@@ -1474,6 +1514,7 @@ export const register: Register = on => {
     const feedOnce = async (now: number) => {
       const onScreen = pickMarket(now, modeOverride ?? config.market).market
       for (const market of feedMarkets(config, onScreen)) {
+        if (!marketNeedsFeed(now, market)) continue
         if (market === 'us') await feedUs(now)
         else await feedTw(now)
       }
