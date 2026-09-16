@@ -200,6 +200,7 @@ watchlist, copy [`stock-band.example.json`](stock-band.example.json) to
 | `feedMs` | `30000` | seconds between feed requests, in ms (floor 15000 — below that Yahoo answers 429; the request budget can widen it further) |
 | `pageMs` | `10000` | how long one page holds before the board turns, in ms (floor 4000; `0` turns auto-paging off and leaves `翻頁` as the only way to page). Pressing `翻頁` restarts this countdown |
 | `tw` / `us` | built-in lists | `{ code, name, prevClose }` per symbol; only `code` is required. Taiwan 上櫃 symbols need `"ex": "otc"` (e.g. 6488 環球晶) |
+| `twIndices` | TAIEX / SEMI / FINANCE / SHIPPING | which indices the footer flaps through on the Taiwan board — see [Picking your own Taiwan indices](#picking-your-own-taiwan-indices). `mis` route only |
 
 Both built-in lists are 20 symbols, so `columns` resolves to 2 and each page
 holds 10 (a single-column page holds 5). Past that the watchlist pages, and
@@ -253,6 +254,74 @@ instead of leaving it on demo prices until the next tick.
 - **Repeated URLs come back cached** — measured: six ticks over 80 seconds
   returned a byte-identical body and a frozen price — so every request carries a
   `_=<timestamp>` and no-cache headers.
+## Picking your own Taiwan indices
+
+The Taiwan footer ships with four: **TAIEX** (加權指數), **SEMI** (半導體類),
+**FINANCE** (金融保險類) and **SHIPPING** (航運類) — the headline number plus
+the three sectors that move Taiwan on any given day. They rotate, 5 seconds
+each, so one lap is 20 seconds.
+
+Replace the whole list with `twIndices` in your config:
+
+```json
+{
+  "twSource": "mis",
+  "twIndices": [
+    { "code": "t00", "name": "TAIEX" },
+    { "code": "t24", "name": "SEMI" },
+    { "code": "TW50", "name": "TW50" },
+    { "code": "o00", "name": "TPEx", "ex": "otc" }
+  ]
+}
+```
+
+**The first entry is the headline index** — the one the rest of the band reads
+the market by. `ex` defaults to `tse`; 櫃買 (`o00`) is the one that needs
+`"ex": "otc"`.
+
+Some worth knowing about, all verified answering live on 2026-09-16:
+
+| `code` | index | why you might want it |
+| --- | --- | --- |
+| `t00` | 發行量加權股價指數 | TAIEX, the headline number |
+| `t24` | 半導體類 | the engine — says more about the day than TAIEX does |
+| `t13` | 電子工業類 | the whole electronics board, a layer wider than semis |
+| `t17` | 金融保險類 | often moves against electronics; the pair tells you rotation from rally |
+| `t15` | 航運類 | volatile, so it reads as a sentiment gauge |
+| `t25` | 電腦及週邊設備類 | the AI-server names (廣達, 華碩) |
+| `TW50` | 臺灣50 | what 0050 tracks |
+| `TWDP` | 臺灣高股息 | the benchmark behind the dividend ETFs |
+| `TWMC` | 臺灣中型100 | mid caps — life without TSMC |
+| `t003` | 未含金融電子 | drop both heavyweights and see how everyone else did |
+| `FRMSA` | 寶島股價 | 上市 + 上櫃 together, the only whole-market number |
+| `o00` | 櫃買指數 | TPEx (needs `"ex": "otc"`) |
+
+That is a shortlist. The exchange publishes **146 index channels** and this
+route can read any of them — ask it for the full list yourself:
+
+```sh
+curl -s -H 'User-Agent: Mozilla/5.0' -H 'Referer: https://mis.twse.com.tw/stock/index.jsp' \
+  'https://mis.twse.com.tw/stock/api/getCategory.jsp?ex=tse&i=TIDX' | python3 -m json.tool
+```
+
+Three things to know before you go long:
+
+- **They are free, but the footer's time is not.** MIS answers every index on
+  the same request as the quotes, so ten indices cost exactly what two do —
+  zero extra requests. But at 5 seconds a row, ten of them is a 50-second lap
+  before TAIEX comes back around. Three to five is the useful range.
+- **Names must be Latin.** The board flaps a row one character at a time, and a
+  Chinese character has no drum to riffle through, so `半導體` would sit there
+  unable to turn. Give it `SEMI`.
+- **`mis` only.** Yahoo has no Taiwan sector indices — the Yahoo route shows
+  TAIEX alone, and even that disagrees with the exchange: on 2026-09-16 Yahoo's
+  `^TWII` reported the previous close as 45,862.5 against the exchange's
+  45,511.49, which turned a +337 point day into −13.6 on the band. If the
+  Taiwan footer matters to you, set `"twSource": "mis"`.
+
+A code the exchange does not recognise simply answers nothing and that row is
+left out, so a typo costs one missing index rather than the whole footer.
+
 - **The footer is a Solari split-flap board.** `^DJI`, `^GSPC` and `^IXIC` ride
   the same batched request as the quotes, so all three cost nothing extra. Each
   holds for 5 seconds, then the row turns: a two-column block front sweeps left

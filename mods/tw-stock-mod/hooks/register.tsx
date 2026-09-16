@@ -86,11 +86,22 @@ const TW_INDEX_SYMBOL = 't00' // 發行量加權股價指數, what MARKETS.tw ca
 // Latin names for the same reason the US ones are Latin: the board flaps one
 // character at a time and a Chinese character has no drum to riffle through.
 // they are named `code` rather than `symbol` so misChannel() takes them as-is
-const TW_INDICES: { code: string; name: string; ex: TwExchange }[] = [
+// MIS answers every index on the same request as the quotes, so the length of
+// this list costs nothing. What it does cost is time on the footer: each row
+// holds 5 s before the board flaps to the next, so four indices is a 20 s lap.
+// `twIndices` in the config replaces the whole list - the exchange publishes
+// 146 of them (getCategory.jsp?ex=tse&i=TIDX lists every channel).
+const TW_INDICES: TwIndex[] = [
   { code: TW_INDEX_SYMBOL, name: 'TAIEX', ex: 'tse' }, // 發行量加權股價指數
-  { code: 'o00', name: 'TPEx', ex: 'otc' }, // 櫃買指數
+  { code: 't24', name: 'SEMI', ex: 'tse' }, // 半導體類指數
+  { code: 't17', name: 'FINANCE', ex: 'tse' }, // 金融保險類指數
+  { code: 't15', name: 'SHIPPING', ex: 'tse' }, // 航運類指數
+  // 櫃買 is { code: 'o00', name: 'TPEx', ex: 'otc' } - it needs the otc channel
 ]
 const TW_YAHOO_INDEX = '^TWII' // the Yahoo route's only index; ^TWOII answers a year-old close
+
+/** a footer index row on the MIS route; `code`/`ex` are what misChannel() reads */
+type TwIndex = { code: string; name: string; ex: TwExchange }
 
 type MarketId = 'tw' | 'us'
 type Phase = 'open' | 'closed'
@@ -425,6 +436,8 @@ type Config = {
   feedMs: number
   /** how long one page of the watchlist holds before the board turns; 0 = manual only */
   pageMs: number
+  /** the indices the footer flaps through on the Taiwan board (MIS route only) */
+  twIndices: TwIndex[]
   /**
    * `full` flaps and blinks on a 50 ms frame clock; `off` leaves the board
    * still and repaints once a second for the countdown (and not at all if the
@@ -490,6 +503,7 @@ function defaultConfig(): Config {
     twSource: 'yahoo',
     feedMs: FEED_MS_DEFAULT,
     pageMs: PAGE_MS_DEFAULT,
+    twIndices: TW_INDICES,
     animation: 'full',
     countdown: true,
     lists: { tw: TW_LIST, us: US_LIST },
@@ -573,7 +587,33 @@ function parseConfig(text: string | undefined): Config {
   if (root.animation === 'off' || root.animation === false) cfg.animation = 'off'
   if (root.countdown === false) cfg.countdown = false
   cfg.lists = { tw: parseList(root.tw, TW_LIST), us: parseList(root.us, US_LIST) }
+  cfg.twIndices = parseTwIndices(root.twIndices)
   return cfg
+}
+
+/**
+ * The footer's Taiwan index rows. A channel the exchange does not know simply
+ * answers nothing and `publish` leaves that row out, so a typo costs one
+ * missing row rather than the whole footer. `name` has to be Latin: the board
+ * flaps a row one character at a time and a Chinese character has no drum to
+ * riffle through, so a Chinese name would sit there unable to turn.
+ */
+function parseTwIndices(value: unknown): TwIndex[] {
+  if (!Array.isArray(value)) return TW_INDICES
+  const out: TwIndex[] = []
+  for (const raw of value) {
+    const entry = asRecord(raw)
+    if (!entry) continue
+    const code = str(entry.code, '')
+    if (!code) continue
+    const known = TW_INDICES.find(i => i.code === code)
+    out.push({
+      code,
+      name: str(entry.name, known?.name ?? code.toUpperCase()),
+      ex: entry.ex === 'otc' ? 'otc' : 'tse',
+    })
+  }
+  return out.length > 0 ? out : TW_INDICES
 }
 
 type QuotesFile = {
@@ -1396,7 +1436,11 @@ export const register: Register = on => {
         return
       }
 
-      const channels = [...list.map(misChannel), ...TW_INDICES.map(misChannel)]
+      // the first entry is the one the market is read by, so an empty list
+      // would leave the board with no headline index at all - parseTwIndices
+      // never returns one
+      const indices = config.twIndices
+      const channels = [...list.map(misChannel), ...indices.map(misChannel)]
       const res = await $.http.fetch(misUrl(channels, now), { headers: FEED_HEADERS })
       if (!res.ok) return backOff(now, `HTTP ${res.status} (證交所)`)
       const { quotes: parsed, tradedAt } = parseMis(res.text)
@@ -1407,8 +1451,8 @@ export const register: Register = on => {
         list,
         parsed,
         keyOf: t => t.code,
-        indices: TW_INDICES.map(i => ({ key: i.code, name: i.name })),
-        indexKey: TW_INDEX_SYMBOL,
+        indices: indices.map(i => ({ key: i.code, name: i.name })),
+        indexKey: indices[0].code,
         tradedAt,
         now,
         sourceLabel: '證交所 即時',

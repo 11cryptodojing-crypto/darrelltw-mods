@@ -7,22 +7,86 @@
   "trend": "none",
   "feed": "auto",
   "twSource": "mis",
+  "_twIndices_comment": "Taiwan footer indices, MIS route only. First entry is the headline index; names must be Latin (the split-flap board cannot turn a Chinese character). 146 channels exist - see the README.",
+  "twIndices": [
+    {
+      "code": "t00",
+      "name": "TAIEX"
+    },
+    {
+      "code": "t24",
+      "name": "SEMI"
+    },
+    {
+      "code": "t17",
+      "name": "FINANCE"
+    },
+    {
+      "code": "t15",
+      "name": "SHIPPING"
+    }
+  ],
   "feedMs": 30000,
   "pageMs": 10000,
   "_tw_comment": "Taiwan 上櫃 symbols need \"ex\": \"otc\"; 上市 is the default. prevClose only matters for demo prices.",
   "tw": [
-    { "code": "2330", "name": "台積電", "prevClose": 2380 },
-    { "code": "2317", "name": "鴻海", "prevClose": 248.5 },
-    { "code": "2454", "name": "聯發科", "prevClose": 4560 },
-    { "code": "0050", "name": "元大台灣50", "prevClose": 107.7 },
-    { "code": "006208", "name": "富邦台50", "prevClose": 246.1 },
-    { "code": "6488", "name": "環球晶", "ex": "otc", "prevClose": 914 }
+    {
+      "code": "2330",
+      "name": "台積電",
+      "prevClose": 2380
+    },
+    {
+      "code": "2317",
+      "name": "鴻海",
+      "prevClose": 248.5
+    },
+    {
+      "code": "2454",
+      "name": "聯發科",
+      "prevClose": 4560
+    },
+    {
+      "code": "0050",
+      "name": "元大台灣50",
+      "prevClose": 107.7
+    },
+    {
+      "code": "006208",
+      "name": "富邦台50",
+      "prevClose": 246.1
+    },
+    {
+      "code": "6488",
+      "name": "環球晶",
+      "ex": "otc",
+      "prevClose": 914
+    }
   ],
   "us": [
-    { "code": "NVDA", "name": "NVIDIA", "prevClose": 218.29 },
-    { "code": "TSLA", "name": "Tesla", "prevClose": 365.44 },
-    { "code": "NET", "name": "Cloudflare", "prevClose": 306.53 },
-    { "code": "QQQ", "name": "Invesco QQQ", "prevClose": 714.88 },
-    { "code": "VOO", "name": "Vanguard 500", "prevClose": 702.56 }
+    {
+      "code": "NVDA",
+      "name": "NVIDIA",
+      "prevClose": 218.29
+    },
+    {
+      "code": "TSLA",
+      "name": "Tesla",
+      "prevClose": 365.44
+    },
+    {
+      "code": "NET",
+      "name": "Cloudflare",
+      "prevClose": 306.53
+    },
+    {
+      "code": "QQQ",
+      "name": "Invesco QQQ",
+      "prevClose": 714.88
+    },
+    {
+      "code": "VOO",
+      "name": "Vanguard 500",
+      "prevClose": 702.56
+    }
   ]
 }
