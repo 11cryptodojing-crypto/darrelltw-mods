@@ -94,10 +94,30 @@ def field(obj, name, default=None):
     return default if value is None else value
 
 
-def snapshot_rows(api, contracts: dict) -> dict:
+def resolve_name(code: str, contracts: dict, watchlist_names: dict) -> str:
+    """
+    Every quote and every holding names itself this way: the Shioaji contract
+    first (`contract.name`, e.g. 台積電 - the one source that is always right
+    when it has an answer), the watchlist's own name second (whatever
+    `stock-band.json`'s `tw` entry or --codes said, which itself defaults to
+    the code when nobody wrote a real name), and the code last. A code added
+    to the fetch only because it showed up in `list_positions` - not on the
+    watchlist at all - has no watchlist name to fall back to, so it depended
+    entirely on the contract lookup; skipping this and naming a union row by
+    its bare code (`00631L`, `2308`, even `2330`, which IS on the built-in
+    list but was never in the SCRIPT's own copy of it before --codes existed)
+    was the bug.
+    """
+    contract = contracts.get(code)
+    cname = getattr(contract, "name", None) if contract else None
+    return cname or watchlist_names.get(code) or code
+
+
+def snapshot_rows(api, contracts: dict, watchlist_names: dict | None = None) -> dict:
     """code -> {price, prevClose, name}. A symbol the snapshot skipped is left out."""
     if not contracts:
         return {}
+    watchlist_names = watchlist_names or {}
     snaps = api.snapshots(list(contracts.values()))
     out = {}
     for snap in snaps:
@@ -115,14 +135,14 @@ def snapshot_rows(api, contracts: dict) -> dict:
         out[code] = {
             "price": close,
             "prevClose": prev_close,
-            "name": getattr(contract, "name", None) or code,
+            "name": resolve_name(code, contracts, watchlist_names),
             "ts": int(field(snap, "ts", 0) or 0),
         }
     return out
 
 
-def build_payload(api, watchlist: list[dict], contracts: dict, index_contracts: list) -> dict | None:
-    quotes = snapshot_rows(api, contracts)
+def build_payload(api, contracts: dict, index_contracts: list, watchlist_names: dict) -> dict | None:
+    quotes = snapshot_rows(api, contracts, watchlist_names)
     if not quotes:
         return None
 
@@ -153,14 +173,13 @@ def build_payload(api, watchlist: list[dict], contracts: dict, index_contracts: 
         "dataAt": data_at,
         "market": "tw",
         "source": "永豐 即時",
+        # every code the snapshot actually answered, not just the ones that
+        # started out on the watchlist - `contracts` already IS the union
+        # (watchlist UNION positions, kept current every tick in main()), so
+        # this covers a position-only code the same as a watchlist one.
         "quotes": {
-            row["code"]: {
-                "price": round(quotes[row["code"]]["price"], 4),
-                "prevClose": round(quotes[row["code"]]["prevClose"], 4),
-                "name": row["name"],
-            }
-            for row in watchlist
-            if row["code"] in quotes
+            code: {"price": round(row["price"], 4), "prevClose": round(row["prevClose"], 4), "name": row["name"]}
+            for code, row in quotes.items()
         },
     }
     if indices:
@@ -169,7 +188,7 @@ def build_payload(api, watchlist: list[dict], contracts: dict, index_contracts: 
     return payload
 
 
-def build_holdings_payload(positions: list, contracts: dict, quotes: dict) -> dict | None:
+def build_holdings_payload(positions: list, contracts: dict, quotes: dict, watchlist_names: dict) -> dict | None:
     """
     `api.list_positions` -> the holdings file's shape (see
     references/quote-sources.md's 損益 section and stock-holdings.example.json).
@@ -189,7 +208,7 @@ def build_holdings_payload(positions: list, contracts: dict, quotes: dict) -> di
             qty = -qty
         cost = float(field(pos, "price", 0) or 0)
         contract = contracts.get(code)
-        name = getattr(contract, "name", None) or code
+        name = resolve_name(code, contracts, watchlist_names)
         live = quotes.get(code)
         last_price = float(field(pos, "last_price", 0) or 0)
         price = live["price"] if live else (last_price or cost)
@@ -318,6 +337,13 @@ def main() -> None:
             "或用 --codes 指定"
         )
 
+    # Whatever name the watchlist itself carries for a code - resolve_name's
+    # second choice, behind the Shioaji contract. --codes and a `tw` entry
+    # with no explicit "name" both default to the code here, which is fine:
+    # resolve_name still tries the contract first, so this only matters when
+    # the contract lookup itself comes up empty.
+    watchlist_names = {row["code"]: row["name"] for row in watchlist}
+
     # The quotes fetch covers the watchlist UNION every held code (item 4/6 of
     # the spec), so a holding that never made the watchlist still gets a live
     # price in stock-quotes.json - build_holdings_payload prefers exactly that
@@ -376,7 +402,7 @@ def main() -> None:
                         symbols.append({"code": code, "name": code})
 
             try:
-                payload = build_payload(api, symbols, contracts, index_contracts)
+                payload = build_payload(api, contracts, index_contracts, watchlist_names)
             except Exception as err:  # noqa: BLE001 - any SDK error is the same story here
                 print(f"快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
                 payload = None
@@ -390,7 +416,9 @@ def main() -> None:
             # that still looks live
 
             try:
-                holdings_payload = build_holdings_payload(positions, contracts, payload["quotes"] if payload else {})
+                holdings_payload = build_holdings_payload(
+                    positions, contracts, payload["quotes"] if payload else {}, watchlist_names
+                )
             except Exception as err:  # noqa: BLE001 - same story as the quotes snapshot
                 print(f"庫存快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
                 holdings_payload = None

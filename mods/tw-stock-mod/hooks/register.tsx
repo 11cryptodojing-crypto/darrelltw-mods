@@ -360,6 +360,12 @@ type QuoteRow = {
    * and they are what makes the board flap the left-hand columns as well.
    */
   was?: { price: number; change: number; pct: number; code?: string; name?: string }
+  /**
+   * the market has a live/override snapshot, but it never priced this code -
+   * not the same as "no change" (pct 0). board.tsx draws a dim placeholder
+   * instead of the price/change/pct fields; see buildProps' quotes.map.
+   */
+  noData?: boolean
 }
 
 // PROTOTYPE: a deterministic sine walk off the previous close, so the band
@@ -894,12 +900,27 @@ function holdingExtras(market: MarketId, list: Ticker[], cfg: Config): Ticker[] 
     .map(h => ({ code: h.code, name: h.name, prevClose: h.prevClose ?? h.cost ?? 100, amp: 0.8, phase: 0, period: 57, drift: 0 }))
 }
 
-function pricedHoldings(holdings: Holding[], quotesFile: QuotesFile | undefined): PricedHolding[] {
+function pricedHoldings(
+  holdings: Holding[],
+  quotesFile: QuotesFile | undefined,
+  cfg: Config,
+  market: MarketId,
+): PricedHolding[] {
   return holdings.map(h => {
     const live = quotesFile?.quotes[h.code]
     const price = live?.price ?? h.price ?? h.cost
     const prevClose = live?.prevClose ?? h.prevClose ?? price
-    return { code: h.code, name: live?.name ?? h.name, qty: h.qty, cost: h.cost, price, prevClose }
+    // `h.name` defaults to `h.code` when the holdings file or the config's
+    // `holdings` block left it out (parseHoldingsList), so `h.name ===
+    // h.code` is how "this holding has no real name" shows up here. In that
+    // case: the config/built-in watchlist's own name for the same code
+    // (even one bought outside the watchlist can still be a known symbol),
+    // then whatever the quotes file says, then the code itself as the last
+    // resort - never a bare code standing in for a name when something
+    // better is one lookup away.
+    const configName = cfg.lists[market].find(t => t.code === h.code)?.name
+    const name = h.name !== h.code ? h.name : (configName ?? live?.name ?? h.code)
+    return { code: h.code, name, qty: h.qty, cost: h.cost, price, prevClose }
   })
 }
 
@@ -1136,6 +1157,15 @@ function buildProps(
         quotesFile?.prev?.[sym.code]?.price,
       )
     }
+    if (quotesFile) {
+      // The market HAS a live/override snapshot - it just never priced this
+      // particular code (a fetcher whose own list is narrower than the
+      // band's, or a gap the Yahoo bridge merge in quotesFor did not cover
+      // either). A demo-walk number here would look like a real price under
+      // a 永豐 即時/證交所 即時 footer, so this draws as a dim placeholder
+      // instead (board.tsx reads QuoteRow.noData).
+      return { ...quoteRow(sym, sym.prevClose, sym.prevClose), noData: true }
+    }
     return quoteRow(sym, demoPrice(sym, now), sym.prevClose)
   })
 
@@ -1202,7 +1232,7 @@ function buildProps(
     lastHoldingsFile,
     cfg,
   )
-  const priced = pricedHoldings(rawHoldings, quotesFile)
+  const priced = pricedHoldings(rawHoldings, quotesFile, cfg, market)
   const holdingsPages = Math.max(1, Math.ceil(priced.length / PNL_PAGE_SIZE))
   lastHoldingsPageCount = holdingsPages
   const holdingsPageIdx = ((holdingsPage % holdingsPages) + holdingsPages) % holdingsPages
@@ -1410,7 +1440,21 @@ function marketNeedsFeed(now: number, market: MarketId): boolean {
 // with no snapshot falls back to the demo walk, which is what the footer's
 // 示範資料 tag is for.
 function quotesFor(market: MarketId, now: number): QuotesFile | undefined {
-  if (lastFile && (!lastFile.market || lastFile.market === market)) return lastFile
+  if (lastFile && (!lastFile.market || lastFile.market === market)) {
+    // The override file wins, but it does not have to be COMPLETE to win: a
+    // fetcher whose own watchlist is narrower than the band's (or briefly
+    // out of date) can leave a code the table draws with no quote at all.
+    // `liveBy[market]` is the built-in feed's own last snapshot for this
+    // market - for `twSource: "shioaji"` that is exactly the Yahoo bridge
+    // spawnShioaji runs while the override is stale (feedTwYahoo), and its
+    // codes are the band's full watchlist. Fill gaps from it before falling
+    // through to buildProps' own noData marker; the override's own entries
+    // always win over the bridge's.
+    const bridge = liveBy[market]
+    const bridgeHolds = bridge && snapshotHolds(bridge.file.asOf, now, market)
+    if (!bridgeHolds) return lastFile
+    return { ...lastFile, quotes: { ...bridge.file.quotes, ...lastFile.quotes } }
+  }
   const snap = liveBy[market]
   if (!snap || !snapshotHolds(snap.file.asOf, now, market)) return undefined
   const quotes: Record<string, FileQuote> = {}
@@ -1831,6 +1875,15 @@ export const register: Register = on => {
           // can observe for "the script isn't feeding the file" is the file
           // staying stale, which is exactly what the Yahoo fallback below
           // reacts to - it does not depend on this try/catch firing.
+          // --codes is the band's own effective Taiwan watchlist (built-in
+          // list included, not just whatever `stock-band.json` overrides) -
+          // without it the script fell back to reading `tw` out of
+          // stock-band.json itself, which is empty whenever a project has no
+          // config file at all, and it then snapshotted only the account's
+          // positions: every OTHER watchlist row stayed on a demo price
+          // while the footer still said 永豐 即時. Passing the codes here is
+          // what makes the script price the same list the table draws.
+          const codes = config.lists.tw.map(t => t.code).join(',')
           await $.process.run(
             [
               '/bin/sh',
@@ -1844,6 +1897,8 @@ export const register: Register = on => {
               env,
               '--interval',
               String(config.shioaji.interval),
+              '--codes',
+              codes,
               '--heartbeat',
               heartbeatPath,
               '--pidfile',

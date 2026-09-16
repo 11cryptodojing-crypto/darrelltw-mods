@@ -34,6 +34,12 @@ export type QuoteRow = {
    * `code`/`name` only appear on a page turn, when the slot changed symbol.
    */
   was?: { price: number; change: number; pct: number; code?: string; name?: string }
+  /**
+   * the market has a live/override snapshot, but it never priced this code -
+   * not the same as "no change" (pct 0). Drawn as a dim placeholder instead
+   * of the price/change/pct fields (see drawTwoColQuote and the table loop).
+   */
+  noData?: boolean
 }
 
 /** a holding, already priced by register.tsx - the 損益 view only formats these */
@@ -858,6 +864,12 @@ function drawTwoColQuote(r: Row, half: HalfLayout, q: QuoteRow, market: MarketId
   const rowStart = turned ? rowTurn - slot * PAGE_ROW_STAGGER : RESTING
   drawSymbolCell(r, half.symCol, half.nameCol, half.showName, q, rowStart, turned)
 
+  if (q.noData) {
+    r.putRight(half.priceRight, '—', DIM)
+    r.putRight(half.pctRight, '—', DIM)
+    return
+  }
+
   const color = tone(market, q.pct)
   const pctText = (v: number) => `${v > 0 ? '▲' : v < 0 ? '▼' : '-'} ${signed(v)}%`
   const turn = q.was ? rowTurn - slot * (turned ? PAGE_ROW_STAGGER : ROW_STAGGER) : RESTING
@@ -1221,6 +1233,13 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
         const turned = q.was?.code !== undefined
         const rowStart = turned ? rowTurn - i * PAGE_ROW_STAGGER : RESTING
         drawSymbolCell(r, lay.symCol, lay.nameCol, lay.showName, q, rowStart, turned)
+
+        if (q.noData) {
+          r.putRight(lay.priceRight, '—', DIM)
+          r.putRight(lay.chgRight, '—', DIM)
+          r.putRight(lay.pctRight, '—', DIM)
+          continue
+        }
 
         const color = tone(props.market, q.pct)
         const pctText = (v: number) => `${v > 0 ? '▲' : v < 0 ? '▼' : '-'} ${signed(v)}%`
