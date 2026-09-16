@@ -1215,6 +1215,24 @@ function quotesFor(market: MarketId, now: number): QuotesFile | undefined {
 // append 固定 to distinguish a pinned market from the same market in auto
 // mode, which is a distinction the label has no business carrying: the two
 // draw identical boards and only differ hours later, at the handover.
+/** up is red in Taiwan and green in the US - see board.tsx's tone() */
+function toneOf(market: MarketId, value: number): string {
+  if (value === 0) return FLAT
+  const up = market === 'tw' ? DOWN_RED : UP_GREEN
+  return value > 0 ? up : market === 'tw' ? UP_GREEN : DOWN_RED
+}
+
+function thousands(value: number, decimals = 2): string {
+  const neg = value < 0
+  const [int, frac] = Math.abs(value).toFixed(decimals).split('.')
+  const grouped = int.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+  return `${neg ? '-' : ''}${grouped}${frac ? `.${frac}` : ''}`
+}
+function signed(value: number, decimals = 2): string {
+  const sign = value > 0 ? '+' : value < 0 ? '-' : ''
+  return sign + thousands(Math.abs(value), decimals)
+}
+
 function marketButtonLabel(marketLabel: string): string {
   return `${marketLabel} ▾`
 }
@@ -1238,6 +1256,12 @@ function nextMode(mode: MarketMode, onBand: MarketId): MarketMode {
 // two files never import each other (a Client module loads by literal path
 // only; see docs/api-notes.md).
 const ORANGE = '#d97757'
+// the same up/down pair board.tsx uses, for the same reason it has its own copy
+const UP_GREEN = '#3fb950'
+const DOWN_RED = '#e5534b'
+const FLAT = '#9aa0a6'
+const WHITE = '#e6edf3'
+const SYMBOL_BLUE = '#79a8ff' // the same blue the board paints symbols in
 const MOON_BLUE = '#8ab4f8' // the closed-session moon, so 休市 still reads at a glance
 const DIM = '#6e7681'
 const SUN = '☀'
@@ -1247,7 +1271,7 @@ const MOON = '☽'
 // now); the chart Client kept its own, since that title names the symbol
 // being charted rather than the market
 const TABLE_BOARD_ROWS = 8
-const CHART_BOARD_ROWS = 9
+const CHART_BOARD_ROWS = 8
 
 function charWidth(ch: string): number {
   const cp = ch.codePointAt(0) ?? 0
@@ -1691,6 +1715,40 @@ export const register: Register = on => {
     const leftCoreWidth =
       dispWidth(marketLabel) + 1 + dispWidth(`${open ? SUN : MOON} ${open ? '盤中' : '休市'}`) + 1 +
       dispWidth(props.sessionNote)
+    // The chart view's title used to be the board's own first row, which made
+    // the whole band a line taller the moment you opened a chart - the
+    // transcript above it jumped every time. It rides here instead, where
+    // there is room beside the three chart buttons, so both views are eight
+    // rows and nothing moves. The pieces drop right to left as the terminal
+    // narrows: the bar interval and the session state go first, then the
+    // company name, and the symbol with its price always stays.
+    const focused = chart ? props.quotes[Math.max(0, Math.min(props.quotes.length - 1, props.focus))] : undefined
+    const chartTitle = focused
+      ? {
+          code: focused.code,
+          name: focused.name,
+          price: thousands(focused.price),
+          move: `${focused.pct > 0 ? '▲' : focused.pct < 0 ? '▼' : '-'} ${signed(focused.change)} (${signed(focused.pct)}%)`,
+          color: toneOf(props.market, focused.pct),
+          bars: `${props.barLabel} · ${open ? `${SUN} 盤中` : `${MOON} 休市`}`,
+        }
+      : undefined
+    // what the chart's own buttons take, so the title knows what room is left
+    const CHART_BUTTON_COLS = 34
+    const titleCore = chartTitle ? dispWidth(marketLabel) + 1 + dispWidth(`${chartTitle.code} ${chartTitle.price} ${chartTitle.move}`) : 0
+    const showChartName =
+      chartTitle !== undefined &&
+      titleCore + 1 + dispWidth(chartTitle.name) + CHART_BUTTON_COLS + RIGHT_BUTTON_GROUP_COLS <= cols
+    const showChartBars =
+      chartTitle !== undefined &&
+      titleCore +
+        (showChartName ? 1 + dispWidth(chartTitle.name) : 0) +
+        1 +
+        dispWidth(chartTitle.bars) +
+        CHART_BUTTON_COLS +
+        RIGHT_BUTTON_GROUP_COLS <=
+        cols
+
     const showTaipei =
       table &&
       props.taipeiNote !== '' &&
@@ -1712,6 +1770,13 @@ export const register: Register = on => {
                 through, rather than stranded on the far right where the eye is
                 not. The session state and hours give up the space because the
                 chart draws its own title row with both already on it. */}
+            {chartTitle ? <Text> </Text> : null}
+            {chartTitle ? <Text color={SYMBOL_BLUE}>{chartTitle.code}</Text> : null}
+            {chartTitle && showChartName ? <Text color={DIM}>{` ${chartTitle.name}`}</Text> : null}
+            {chartTitle ? <Text color={WHITE}>{`  ${chartTitle.price}`}</Text> : null}
+            {chartTitle ? <Text color={chartTitle.color}>{` ${chartTitle.move}`}</Text> : null}
+            {chartTitle && showChartBars ? <Text color={DIM}>{`  ${chartTitle.bars}`}</Text> : null}
+            {chartTitle ? <Text> </Text> : null}
             {chart ? <Button key="stock-band:prev" label="◀ 上一檔" onPress={onPrev} /> : null}
             {chart ? (
               <Button key="stock-band:next" label={`下一檔 ▶ ${focus + 1}/${rowCount}`} onPress={onNext} />
