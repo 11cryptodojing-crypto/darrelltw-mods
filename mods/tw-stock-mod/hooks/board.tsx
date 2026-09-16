@@ -111,14 +111,13 @@ export type BoardProps = {
   holdings: Holding[]
   /** what the pnl view's title calls the source, e.g. "永豐 庫存" */
   holdingsSource: string
-  /** epoch ms the holdings snapshot was taken; 0 when there is none */
+  /** epoch ms the holdings snapshot was taken, or the matching watchlist quote's time when it has none */
   holdingsAt: number
   /** already applied to `holdings` by register.tsx - board only marks the active header cell */
   pnlSortKey: PnlSortKey
   pnlSortDir: 'asc' | 'desc'
-  /** which page of the holdings the pnl view is showing, and how many there are */
-  holdingsPage: number
-  holdingsPageCount: number
+  /** the first data row on screen, 0-based - a wheel tick moves it, 翻頁 by whole pages; see register.tsx's pnlScroll */
+  holdingsScroll: number
 }
 
 // `turn` is the change the rows last turned for, and `since` is when that turn
@@ -1088,10 +1087,14 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     // band's TWD figures do (US keeps cents throughout).
     const priceDecimals = 2
     const decimals = props.market === 'us' ? 2 : 0
-    // register.tsx has already sorted the full list by props.pnlSortKey/Dir -
-    // this only slices the page and marks which header is active.
+    // register.tsx has already sorted the full list by props.pnlSortKey/Dir
+    // and clamped holdingsScroll to it - this only slices the window and
+    // marks which header/hint is active.
     const holdings = props.holdings
-    const page = holdings.slice(props.holdingsPage * PNL_PAGE_SIZE, props.holdingsPage * PNL_PAGE_SIZE + PNL_PAGE_SIZE)
+    const scroll = props.holdingsScroll
+    const page = holdings.slice(scroll, scroll + PNL_PAGE_SIZE)
+    const moreAbove = scroll > 0
+    const moreBelow = scroll + PNL_PAGE_SIZE < holdings.length
 
     // row 0: title - what this is, where the numbers came from, how many
     // positions, and when the snapshot was taken. A demo price anywhere on
@@ -1134,6 +1137,11 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     putRightSortable(lay.todayPnlRight, 'todayPnl', '今日損益')
     putRightSortable(lay.totalPnlRight, 'totalPnl', '總損益')
     putRightSortable(lay.totalPnlPctRight, 'totalPnlPct', '損益%')
+    // a dim hint at the right end when the 5-row window is not the whole
+    // list - ▲ here (rows above are scrolled past), ▼ on the totals row
+    // below (rows still below); `put` appends past whatever was last
+    // written, so this never collides with 損益%
+    if (moreAbove) head.put(head.width() + 1, '▲', DIM)
     // header cells only - no row is a click target yet (item 8 of the
     // original spec still holds for the data rows themselves)
     picker.hit = (x, y) => {
@@ -1193,6 +1201,7 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     put(`${signed(pnlTotal, decimals)} (${pct(pnlTotalPct)})`, tone(props.market, pnlTotal))
     put('  今日 ', DIM)
     put(signed(todayTotal, decimals), tone(props.market, todayTotal))
+    if (moreBelow) foot.put(foot.width() + 2, '▼', DIM)
   } else {
     // row 0: column headers. row 1: rule. The market name, session state,
     // hours and market clock used to open this view as its own title row;

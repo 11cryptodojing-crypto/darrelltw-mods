@@ -21,10 +21,12 @@ deterministic sine walk off each symbol's previous close and the footer says
 `示範資料（未接 API）`, so the tag always tells you what you are looking at.
 See [The live feed](#the-live-feed).
 
-**損益 shows your holdings, not just the watchlist.** The 損益 button next to
-趨勢圖 opens a P&L table — 股數/成本/現價/今日%/損益/損益% per position, plus a
-portfolio total — read from `<project>/.claude/stock-holdings.json` (or a
-`holdings` block in `stock-band.json`). See [Holdings and the 損益 view](#holdings-and-the-損益-view).
+**損益 shows your holdings, not just the watchlist.** It is a stop in the
+market button's own cycle (美股 → 台股 → 台股庫存, …) — landing on it opens a
+sortable, scrollable P&L table (張數/成本/現價/今日%/今日損益/總損益/損益% per
+position, plus a portfolio total) read from
+`<project>/.claude/stock-holdings.json` (or a `holdings` block in
+`stock-band.json`). See [Holdings and the 損益 view](#holdings-and-the-損益-view).
 
 Layout, colors and badges are ported from
 [`prototype/stock-band-demo.py`](prototype/stock-band-demo.py) — read that
@@ -522,10 +524,34 @@ costs and what was actually measured — is in
 
 ## Holdings and the 損益 view
 
-The 損益 button next to 趨勢圖 swaps the table for a P&L board: one row per
-holding (代號/名稱/股數/成本/現價/今日%/損益/損益%, 5 a page with `翻頁` if you
-hold more), and a totals row (market value, cost, total P&L, today's move).
-`回清單` goes back to the watchlist.
+損益 is not its own button — it is a STOP in the market button's own cycle:
+`[ 美股 ▾ ]` → (`美股庫存`, only if US holdings are configured) → `[ 台股 ▾ ]`
+→ `[ 台股庫存 ▾ ]` → back to 美股. Pressing the market button walks the cycle
+one stop at a time; landing on a `庫存` stop swaps the table for a P&L board:
+
+| 代號 | 名稱 | 張數 | 成本 | 現價 | 今日% | 今日損益 | 總損益 | 損益% |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+
+one row per holding, 5 on screen at a time, plus a totals row (market value,
+cost, total P&L, today's move). 張數 is `qty ÷ 1000` (股 ÷ 1000 = 張), shown
+with a decimal only when it is not a whole 張. `名稱` drops first on a narrow
+terminal, the same way the watchlist table's own name column does.
+
+**Sortable, five ways.** 代號/今日%/今日損益/總損益/損益% each sort the list —
+click the header cell (the active one carries a ↓/↑) or press the `排序`
+button to cycle through them, keeping whatever direction was already set. A
+header click on the ALREADY-active column flips its direction instead of
+re-sorting by it again. Default: 總損益 descending.
+
+**Scroll it.** The mouse wheel over the band moves the 5-row window while a
+`庫存` stop is on screen (`ui.scroll`, handled by this module directly rather
+than the engine's own AbovePrompt windowing — the board itself never
+changes height). `翻頁` jumps a whole 5 rows at a time and wraps back to the
+top; either one moves the same underlying position, so they never disagree
+about which page you are on. A dim `▲`/`▼` at the right end of the header or
+totals row says there are more rows to scroll to in that direction. Sorting
+by a different column, or cycling the market button to a different stop,
+resets the scroll position back to the top.
 
 Write `<project>/.claude/stock-holdings.json` in the shape of
 [`stock-holdings.example.json`](stock-holdings.example.json):
@@ -535,17 +561,26 @@ Write `<project>/.claude/stock-holdings.json` in the shape of
   "holdings": [ { "code": "2330", "name": "台積電", "qty": 1000, "cost": 980.5, "price": 1188.0, "prevClose": 1165.0 } ] }
 ```
 
-`qty` is shares (股), not 張. `cost` is the average cost per share.
-`price`/`prevClose` are optional — the band prefers a live quote for that
-code first (from the watchlist, or from the extra codes the feed fetches for
-exactly this reason) and only falls back to these when nothing priced that
-code. Unlike the quotes file, this one is never expired by age: a position
-does not go wrong just because nobody wrote a fresh copy in the last two
-minutes, but `asOf` still shows on the board's title row.
+`qty` is shares (股), not 張 — the band divides by 1000 itself for the 張數
+column. `cost` is the average cost per share. `price`/`prevClose` are
+optional — the band prefers a live quote for that code first (from the
+watchlist, or from the extra codes the feed fetches for exactly this reason)
+and only falls back to these when nothing priced that code. Unlike the
+quotes file, this one is never expired by age: a position does not go wrong
+just because nobody wrote a fresh copy in the last two minutes.
+
+**The title's 更新 time.** `asOf` shows there when the file states one; a
+manual file, or a `holdings` block in `stock-band.json`, usually has no
+timestamp of its own (`asOf: 0`) — rather than print `更新 --:--`, the title
+falls back to the SAME quote time the watchlist footer already shows for
+that market, since the holdings are priced off that live quote anyway.
 
 No fetcher running? Add a `holdings` block to `stock-band.json` instead
 (see [Configure](#configure)) — the holdings file wins over it for whichever
-market it names.
+market it names. The footer/title then calls the source `設定檔` — it means
+the rows came from `holdings` in `stock-band.json` (the user's or the
+project's), not from a broker, so a 設定檔 label is a hint to keep the
+numbers up to date by hand.
 
 `scripts/fetch-quotes-shioaji.py` writes this file automatically every tick,
 from `api.list_positions()` — see

@@ -959,12 +959,12 @@ function holdingsFor(
 ): { holdings: Holding[]; source: string; asOf: number } {
   const manual = cfg.holdings[market]
   if (cfg.holdingsSource === 'config' && manual.length > 0) {
-    return { holdings: manual, source: '手動設定', asOf: 0 }
+    return { holdings: manual, source: '設定檔', asOf: 0 }
   }
   if (file && (!file.market || file.market === market)) {
     return { holdings: file.holdings, source: file.source ?? '庫存檔', asOf: file.asOf }
   }
-  return { holdings: manual, source: manual.length > 0 ? '手動設定' : '', asOf: 0 }
+  return { holdings: manual, source: manual.length > 0 ? '設定檔' : '', asOf: 0 }
 }
 
 /**
@@ -1218,8 +1218,8 @@ type BoardProps = {
   holdingsAt: number
   pnlSortKey: PnlSortKey
   pnlSortDir: 'asc' | 'desc'
-  holdingsPage: number
-  holdingsPageCount: number
+  /** the first data row on screen, 0-based - a wheel tick moves it by `e.by`, 翻頁 by whole pages */
+  holdingsScroll: number
 }
 
 /** how long after a page change the outgoing rows are still worth turning from */
@@ -1321,17 +1321,22 @@ function buildProps(
   const idxValue = quotesFile?.index ? quotesFile.index.value : conf.indexClose * (1 + idxPct / 100)
   const idxChange = quotesFile?.index ? quotesFile.index.change : idxValue - conf.indexClose
 
-  // The pnl view's own list and paging - see the `holdingsPage` module state
-  // comment for why it is not the watchlist's `page`.
-  const { holdings: rawHoldings, source: holdingsSource, asOf: holdingsAt } = holdingsFor(
+  // The pnl view's own list and scroll position - see the `pnlScroll` module
+  // state comment for why it is not the watchlist's `page`.
+  const { holdings: rawHoldings, source: holdingsSource, asOf: rawHoldingsAt } = holdingsFor(
     market,
     lastHoldingsFile,
     cfg,
   )
   const priced = sortHoldings(pricedHoldings(rawHoldings, quotesFile, cfg, market), pnlSortKey, pnlSortDir)
-  const holdingsPages = Math.max(1, Math.ceil(priced.length / PNL_PAGE_SIZE))
-  lastHoldingsPageCount = holdingsPages
-  const holdingsPageIdx = ((holdingsPage % holdingsPages) + holdingsPages) % holdingsPages
+  lastHoldingsCount = priced.length
+  // Manual/config holdings (and a holdings file that never states its own
+  // `asOf`) read 0 here - rather than print `更新 --:--`, the title falls
+  // back to the SAME time the watchlist footer already shows for this
+  // market (quotesFile's dataAt), and only to `now` when neither exists.
+  const holdingsAt = rawHoldingsAt || quotesFile?.dataAt || now
+  const maxScroll = Math.max(0, priced.length - PNL_PAGE_SIZE)
+  const holdingsScroll = Math.max(0, Math.min(maxScroll, pnlScroll))
 
   return {
     market,
@@ -1381,7 +1386,7 @@ function buildProps(
     sessionClose: hhmm(conf.close),
     now,
     // The full priced list, not just the page on screen: board.tsx slices it
-    // itself for the 5 rows it draws (holdingsPage says which slice), but it
+    // itself for the 5 rows it draws (holdingsScroll says where), but it
     // also sums the footer's totals over the whole portfolio, which a
     // pre-sliced list could not answer.
     holdings: priced,
@@ -1389,8 +1394,7 @@ function buildProps(
     holdingsAt,
     pnlSortKey,
     pnlSortDir,
-    holdingsPage: holdingsPageIdx,
-    holdingsPageCount: holdingsPages,
+    holdingsScroll,
   }
 }
 
@@ -1457,16 +1461,27 @@ let turnSeq = 0
 // - which runs on every render - leaves it here.
 let lastPageCount = 1
 
-// The pnl view's own page, kept apart from the watchlist's `page` above: the
-// two views can never be on screen together, but their page counts differ
-// (5 holdings a page vs. 5 or 10 watchlist rows) and a shared counter would
-// leave the pnl view on whatever page the watchlist happened to be on.
-let holdingsPage = 0
-let lastHoldingsPageCount = 1
-// the pnl view's sort - lives here like `view`/`focus` (not reset on a page
-// turn or a market-cycle press), default 總損益 descending
+// The pnl view's own scroll position, kept apart from the watchlist's `page`
+// above: the two views can never be on screen together, but a shared
+// counter would leave the pnl view scrolled to wherever the watchlist
+// happened to be paged. It is a ROW OFFSET (0-based, first row on screen),
+// not a page index, because a wheel tick (ui.scroll) moves it by an
+// arbitrary `e.by` - 翻頁 just moves it by whole PNL_PAGE_SIZE jumps on top
+// of that. Reset to 0 on a sort change or a market-cycle press (see
+// resetPnlScroll) - NOT on its own scroll or page move, obviously.
+let pnlScroll = 0
+// how many holdings buildProps last saw, for ui.scroll's clamp (the event
+// fires outside of buildProps, so it cannot read the current length itself)
+let lastHoldingsCount = 0
+// the pnl view's sort - lives here like `view`/`focus`, default 總損益
+// descending. Persists across a page/scroll move and a market-cycle press
+// (unlike pnlScroll, changing the SORT is not "changing the stop").
 let pnlSortKey: PnlSortKey = 'totalPnl'
 let pnlSortDir: 'asc' | 'desc' = 'desc'
+
+function resetPnlScroll() {
+  pnlScroll = 0
+}
 
 function pageCount(): number {
   return lastPageCount
@@ -2175,6 +2190,7 @@ export const register: Register = on => {
       const nextStop = nextCycleStop({ market: props.market, pnl: props.view === 'pnl' }, hasUsHoldings)
       modeOverride = nextStop.market
       view = nextStop.pnl ? 'pnl' : 'table'
+      resetPnlScroll() // "changing the stop" always resets the pnl scroll position
       // the market the button just landed on may never have been fetched: ask
       // for it now rather than showing demo prices until the next tick
       if (!quotesFor(pickMarket(now, modeOverride).market, now)) requestFeed?.()
@@ -2212,8 +2228,13 @@ export const register: Register = on => {
       focus = 0
       $.ui.invalidate('ui.render')
     }
+    // Moves the scroll offset a whole PNL_PAGE_SIZE at a time, wrapping back
+    // to 0 past the last page - "paging sets the offset to page*5".
+    const holdingsPageCount = Math.max(1, Math.ceil(props.holdings.length / PNL_PAGE_SIZE))
+    const holdingsPageNum = Math.floor(props.holdingsScroll / PNL_PAGE_SIZE) + 1
     const onHoldingsPage = () => {
-      holdingsPage = (props.holdingsPage + 1) % props.holdingsPageCount
+      const curPage = Math.floor(props.holdingsScroll / PNL_PAGE_SIZE)
+      pnlScroll = ((curPage + 1) % holdingsPageCount) * PNL_PAGE_SIZE
       $.ui.invalidate('ui.render')
     }
     // Cycles the five sort keys in a fixed order (PNL_SORT_KEYS), keeping
@@ -2222,6 +2243,7 @@ export const register: Register = on => {
     const onPnlSort = () => {
       const idx = PNL_SORT_KEYS.indexOf(pnlSortKey)
       pnlSortKey = PNL_SORT_KEYS[(idx + 1) % PNL_SORT_KEYS.length]
+      resetPnlScroll() // "changing the sort key/direction" resets the pnl scroll position
       $.ui.invalidate('ui.render')
     }
 
@@ -2287,10 +2309,10 @@ export const register: Register = on => {
                 onPress={onPage}
               />
             ) : null}
-            {pnl && props.holdingsPageCount > 1 ? (
+            {pnl && holdingsPageCount > 1 ? (
               <Button
                 key="stock-band:pnl-page"
-                label={`翻頁 ${props.holdingsPage + 1}/${props.holdingsPageCount}`}
+                label={`翻頁 ${holdingsPageNum}/${holdingsPageCount}`}
                 onPress={onHoldingsPage}
               />
             ) : null}
@@ -2315,6 +2337,24 @@ export const register: Register = on => {
         {await next(e)}
       </Box>
     )
+  })
+
+  // A wheel tick (or the scroll keys) over the band while the pnl stop is on
+  // screen moves `pnlScroll` itself, rather than letting the engine window
+  // the AbovePrompt tree the normal way: the board is a fixed 8-row Client
+  // that already draws exactly one screenful, so there is no taller tree for
+  // the engine's own scroll offset to move over - the 5 DATA rows scrolling
+  // within that fixed height is a job only this module (which owns
+  // `pnlScroll`) and board.tsx (which reads it) can do between them.
+  // Returning `{}` with no `next(e)` is what tells the engine "handled,
+  // stand down" - calling `next(e)` here would ask it to window the tree
+  // itself on top of what this already did.
+  on('ui.scroll', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (view !== 'pnl') return next(e)
+    const maxScroll = Math.max(0, lastHoldingsCount - PNL_PAGE_SIZE)
+    pnlScroll = Math.max(0, Math.min(maxScroll, pnlScroll + e.by))
+    $.ui.invalidate('ui.render')
+    return {}
   })
 
   // Clicking a quote in the table opens its trend chart. The board hit-tests
@@ -2342,6 +2382,7 @@ export const register: Register = on => {
       const key = data.sortPnl as PnlSortKey
       pnlSortDir = key === pnlSortKey ? (pnlSortDir === 'desc' ? 'asc' : 'desc') : 'desc'
       pnlSortKey = key
+      resetPnlScroll() // a header click always changes the key or the direction
       $.ui.invalidate('ui.render')
       return {}
     }
