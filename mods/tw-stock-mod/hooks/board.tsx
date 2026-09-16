@@ -1194,7 +1194,7 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
           }
         } else {
           r.put(lay.symCol, h.code, SYMBOL)
-          if (lay.showName) r.put(lay.nameCol, h.name, WHITE)
+          if (lay.showName) r.put(lay.nameCol, h.name, DIM) // dim at rest too, as the table draws its names
         }
 
         // 張數/成本 never change intraday - drawn static, same as the
