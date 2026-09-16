@@ -43,7 +43,23 @@ export type QuoteRow = {
 }
 
 /** a holding, already priced by register.tsx - the 損益 view only formats these */
-export type Holding = { code: string; name: string; qty: number; cost: number; price: number; prevClose: number }
+export type Holding = {
+  code: string
+  name: string
+  qty: number
+  cost: number
+  price: number
+  prevClose: number
+  /**
+   * what this holding said before the last update - same idea as
+   * QuoteRow.was and deliberately as thin: only `price` is real old data;
+   * was-side 今日%/今日損益/總損益/損益% are derived from it using the
+   * CURRENT cost/qty/prevClose, the same way the table derives
+   * `was.change`/`was.pct` from `was.price` alone. `code`/`name` only
+   * appear on a page/sort turn, when the row's occupant changed.
+   */
+  was?: { price: number; code?: string; name?: string }
+}
 
 /** which pnl column `holdings` is sorted by - register.tsx does the actual sort, board only marks the header */
 export type PnlSortKey = 'code' | 'today' | 'todayPnl' | 'totalPnl' | 'totalPnlPct'
@@ -1089,12 +1105,10 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     const decimals = props.market === 'us' ? 2 : 0
     // register.tsx has already sorted the full list by props.pnlSortKey/Dir
     // and clamped holdingsScroll to it - this only slices the window and
-    // marks which header/hint is active.
+    // marks which header cell is active.
     const holdings = props.holdings
     const scroll = props.holdingsScroll
     const page = holdings.slice(scroll, scroll + PNL_PAGE_SIZE)
-    const moreAbove = scroll > 0
-    const moreBelow = scroll + PNL_PAGE_SIZE < holdings.length
 
     // row 0: title - what this is, where the numbers came from, how many
     // positions, and when the snapshot was taken. A demo price anywhere on
@@ -1137,11 +1151,6 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     putRightSortable(lay.todayPnlRight, 'todayPnl', '今日損益')
     putRightSortable(lay.totalPnlRight, 'totalPnl', '總損益')
     putRightSortable(lay.totalPnlPctRight, 'totalPnlPct', '損益%')
-    // a dim hint at the right end when the 5-row window is not the whole
-    // list - ▲ here (rows above are scrolled past), ▼ on the totals row
-    // below (rows still below); `put` appends past whatever was last
-    // written, so this never collides with 損益%
-    if (moreAbove) head.put(head.width() + 1, '▲', DIM)
     // header cells only - no row is a click target yet (item 8 of the
     // original spec still holds for the data rows themselves)
     picker.hit = (x, y) => {
@@ -1159,23 +1168,64 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     } else {
       // rows 2..6: one holding a row, 5 per page - fewer than 5 on the last
       // page just leaves the remaining rows blank (filled with a
-      // non-breaking space below, same as every other view).
+      // non-breaking space below, same as every other view). 現價/今日%/
+      // 今日損益/總損益/損益% flap the same way the watchlist table's price/
+      // change/pct do - same `rowTurn`, same `flapRight`/`flapField`, no
+      // second animation system: a mount/page/sort turn flaps every visible
+      // row (h.was.code set, see buildProps' pricedForDisplay), a live
+      // price tick flaps only the rows that actually moved (h.was.price
+      // alone, from quotesFile.prev - see pricedHoldings).
       for (let i = 0; i < page.length; i++) {
         const h = page[i]
         const r = rows[2 + i]
+        const turned = h.was?.code !== undefined
+        const rowStart = turned ? rowTurn - i * PAGE_ROW_STAGGER : RESTING
+
+        // symbol/name cell - the same primitives drawSymbolCell (table)
+        // uses, inlined because Holding and QuoteRow share no common type
+        if (turned && rowStart !== RESTING) {
+          const wasCode = h.was?.code ?? h.code
+          const codeW = Math.max(dispWidth(h.code), dispWidth(wasCode))
+          r.put(lay.symCol, flapField(padRight(wasCode, codeW), padRight(h.code, codeW), TEXT_DRUM, rowStart, 0), SYMBOL)
+          if (lay.showName) {
+            const wasName = h.was?.name ?? h.name
+            const nameW = Math.max(dispWidth(h.name), dispWidth(wasName))
+            r.put(lay.nameCol, wipeField(wasName, h.name, nameW, rowStart, flapSpan(1, 0)), DIM)
+          }
+        } else {
+          r.put(lay.symCol, h.code, SYMBOL)
+          if (lay.showName) r.put(lay.nameCol, h.name, WHITE)
+        }
+
+        // 張數/成本 never change intraday - drawn static, same as the
+        // table's own 代號/名稱 columns on a plain price update
+        r.putRight(lay.qtyRight, qtyLabel(h.qty), WHITE)
+        r.putRight(lay.costRight, thousands(h.cost, priceDecimals), DIM)
+
         const todayPnl = (h.price - h.prevClose) * h.qty
         const totalPnl = (h.price - h.cost) * h.qty
         const totalPnlPct = h.cost ? (h.price / h.cost - 1) * 100 : 0
         const todayPct = h.prevClose ? (h.price / h.prevClose - 1) * 100 : 0
-        r.put(lay.symCol, h.code, SYMBOL)
-        if (lay.showName) r.put(lay.nameCol, h.name, WHITE)
-        r.putRight(lay.qtyRight, qtyLabel(h.qty), WHITE)
-        r.putRight(lay.costRight, thousands(h.cost, priceDecimals), DIM)
-        r.putRight(lay.priceRight, thousands(h.price, priceDecimals), WHITE)
-        r.putRight(lay.todayPctRight, pct(todayPct), tone(props.market, todayPct))
-        r.putRight(lay.todayPnlRight, signed(todayPnl, decimals), tone(props.market, todayPnl))
-        r.putRight(lay.totalPnlRight, signed(totalPnl, decimals), tone(props.market, totalPnl))
-        r.putRight(lay.totalPnlPctRight, pct(totalPnlPct), tone(props.market, totalPnlPct))
+
+        const turn = h.was ? rowTurn - i * (turned ? PAGE_ROW_STAGGER : ROW_STAGGER) : RESTING
+        const stagger = turned ? 0 : STAGGER
+        // was-side values are derived from was.price using the CURRENT
+        // cost/qty/prevClose (assumed stable within a tick) - exactly how
+        // quoteRow() derives `was.change`/`was.pct` from `was.price` alone
+        const wasPrice = h.was?.price ?? h.price
+        const wasTodayPct = h.prevClose ? (wasPrice / h.prevClose - 1) * 100 : 0
+        const wasTodayPnl = (wasPrice - h.prevClose) * h.qty
+        const wasTotalPnl = (wasPrice - h.cost) * h.qty
+        const wasTotalPnlPct = h.cost ? (wasPrice / h.cost - 1) * 100 : 0
+        // one shared left anchor for the whole row's sweep, same role
+        // lay.priceCol plays for the table (flapRight's own `left` param)
+        const left = lay.priceRight - 9
+
+        flapRight(r, lay.priceRight, thousands(wasPrice, priceDecimals), thousands(h.price, priceDecimals), WHITE, turn, left, stagger)
+        flapRight(r, lay.todayPctRight, pct(wasTodayPct), pct(todayPct), tone(props.market, todayPct), turn, left, stagger)
+        flapRight(r, lay.todayPnlRight, signed(wasTodayPnl, decimals), signed(todayPnl, decimals), tone(props.market, todayPnl), turn, left, stagger)
+        flapRight(r, lay.totalPnlRight, signed(wasTotalPnl, decimals), signed(totalPnl, decimals), tone(props.market, totalPnl), turn, left, stagger)
+        flapRight(r, lay.totalPnlPctRight, pct(wasTotalPnlPct), pct(totalPnlPct), tone(props.market, totalPnlPct), turn, left, stagger)
       }
     }
 
@@ -1201,7 +1251,6 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     put(`${signed(pnlTotal, decimals)} (${pct(pnlTotalPct)})`, tone(props.market, pnlTotal))
     put('  今日 ', DIM)
     put(signed(todayTotal, decimals), tone(props.market, todayTotal))
-    if (moreBelow) foot.put(foot.width() + 2, '▼', DIM)
   } else {
     // row 0: column headers. row 1: rule. The market name, session state,
     // hours and market clock used to open this view as its own title row;

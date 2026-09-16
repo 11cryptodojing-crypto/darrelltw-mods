@@ -103,25 +103,12 @@ function printBoard(props, tag) {
 
 printBoard(cur.props, 'default sort')
 
-// --- 3. optional trailing steps, straight through the real hook chain ------
-// Each arg is either a sortPnl key (posts the header-click message) or
-// `scroll:<N>` (fires ui.scroll with by=N, exactly what a wheel tick sends).
+// --- 3. optional trailing sortPnl presses, straight through ui.message -----
+// There is no ui.scroll step here on purpose: the engine only raises
+// ui.scroll for a band taller than maxRows, and this Client is a fixed 8
+// rows - see the note near pnlScroll in register.tsx (tried it in 0.9.0,
+// reverted in 0.9.1, zero events on the real build with --debug).
 for (const step of sortPresses) {
-  if (step.startsWith('scroll:')) {
-    const by = Number(step.slice('scroll:'.length))
-    const result = await handlers.get('ui.scroll')(
-      $,
-      { component: 'AbovePrompt', requestId: 'stock-band', offset: 0, by, bodyRows: 8, contentRows: 8, origin: { kind: 'person' } },
-      async () => ({}),
-    )
-    if (!result || typeof result !== 'object') {
-      console.error(`FAIL: ui.scroll did not accept by=${by}`)
-      process.exit(1)
-    }
-    cur = await render()
-    printBoard(cur.props, `after ui.scroll by=${by} (holdingsScroll=${cur.props.holdingsScroll})`)
-    continue
-  }
   const key = step
   const result = await handlers.get('ui.message')(
     $,
