@@ -1,0 +1,26 @@
+{
+  "_comment": "The API seam. Whatever fetches quotes writes <project>/.claude/stock-quotes.json in this shape; the band reads it and stops faking prices. Older than 120s and it is ignored (the band falls back to demo prices). `market` and `asOf` are informational - the band still picks the market off the clock.",
+  "_comment_series": "`series` = recent closes, oldest first, for the row's sparkline (20 points is plenty). `bars` = K bars, oldest first, as [open, high, low, close] or {o,h,l,c}, for the trend view; ~31 of them fit an 80-column band. With bars but no series, the sparkline uses the bars' closes. `barLabel` is what the title calls them, since only the feed knows the interval.",
+  "asOf": 1757900000000,
+  "market": "tw",
+  "barLabel": "5 分 K",
+  "index": { "value": 24340.24, "change": 288.54, "pct": 1.2 },
+  "quotes": {
+    "2330": {
+      "price": 1188.0,
+      "prevClose": 1165.0,
+      "name": "台積電",
+      "series": [1166.0, 1170.5, 1169.0, 1174.0, 1181.5, 1178.0, 1185.0, 1188.0],
+      "bars": [
+        [1165.0, 1172.0, 1164.0, 1170.5],
+        [1170.5, 1176.0, 1168.0, 1174.0],
+        [1174.0, 1183.0, 1173.5, 1181.5],
+        [1181.5, 1190.0, 1180.0, 1188.0]
+      ]
+    },
+    "2317": { "price": 215.5, "prevClose": 214.5, "series": [214.6, 215.1, 214.9, 215.5] },
+    "2454": { "price": 1396.0, "prevClose": 1420.0 },
+    "0050": { "price": 231.0, "prevClose": 228.85 },
+    "006208": { "price": 131.03, "prevClose": 131.4 }
+  }
+}

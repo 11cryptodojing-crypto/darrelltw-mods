@@ -1,0 +1,28 @@
+{
+  "_comment": "Optional: copy to <project>/.claude/stock-band.json. Every key has a default, so a partial file is fine.",
+  "market": "auto",
+  "refreshMs": 3000,
+  "sort": "change",
+  "highlight": true,
+  "trend": "none",
+  "feed": "auto",
+  "twSource": "mis",
+  "feedMs": 30000,
+  "pageMs": 10000,
+  "_tw_comment": "Taiwan 上櫃 symbols need \"ex\": \"otc\"; 上市 is the default. prevClose only matters for demo prices.",
+  "tw": [
+    { "code": "2330", "name": "台積電", "prevClose": 2380 },
+    { "code": "2317", "name": "鴻海", "prevClose": 248.5 },
+    { "code": "2454", "name": "聯發科", "prevClose": 4560 },
+    { "code": "0050", "name": "元大台灣50", "prevClose": 107.7 },
+    { "code": "006208", "name": "富邦台50", "prevClose": 246.1 },
+    { "code": "6488", "name": "環球晶", "ex": "otc", "prevClose": 914 }
+  ],
+  "us": [
+    { "code": "NVDA", "name": "NVIDIA", "prevClose": 218.29 },
+    { "code": "TSLA", "name": "Tesla", "prevClose": 365.44 },
+    { "code": "NET", "name": "Cloudflare", "prevClose": 306.53 },
+    { "code": "QQQ", "name": "Invesco QQQ", "prevClose": 714.88 },
+    { "code": "VOO", "name": "Vanguard 500", "prevClose": 702.56 }
+  ]
+}

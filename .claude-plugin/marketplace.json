@@ -1,0 +1,19 @@
+{
+  "name": "darrelltw-mods",
+  "owner": {
+    "name": "Darrell Wang",
+    "email": "info@darrelltw.com",
+    "url": "https://x.com/darrell_tw_"
+  },
+  "metadata": {
+    "description": "Darrell Wang 做的 Claude Code mods：都在輸入框上面那條區域畫東西，都不花模型 token"
+  },
+  "plugins": [
+    {
+      "name": "tw-stock-mod",
+      "source": "./mods/tw-stock-mod",
+      "category": "productivity",
+      "description": "台股／美股看板：台股時段顯示台股清單（紅漲綠跌），美股時段顯示美股清單（綠漲紅跌），券商風格表格。報價預設走 Yahoo，免金鑰；證交所 MIS 與報價檔覆寫各是一行設定。"
+    }
+  ]
+}
