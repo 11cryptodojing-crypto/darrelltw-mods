@@ -33,6 +33,7 @@ one with just a config in it.
 | `page-reset.mjs` | does pressing 翻頁 push the auto-page deadline out | `node page-reset.mjs $OUT/register.js <proj> <press-at-ms>` |
 | `chart-nav.mjs` | do 上一檔／下一檔／回清單 move the focus and wrap | `node chart-nav.mjs $OUT/register.js <proj>` |
 | `click-to-chart.mjs` | does clicking a table row open that symbol's chart | `node click-to-chart.mjs $OUT/board.js $OUT/register.js <proj> [columns]` |
+| `real-click.py` | does a REAL click in a REAL Claude Code open the chart | `python3 real-click.py <proj> [x] [row] [--plugin-dir <path>]` |
 | `feed-idle.mjs` | does a closed market stop being polled, and does its snapshot still hold | `node feed-idle.mjs $OUT/register.js <proj>` |
 | `feed-open-snooze.mjs` | does an open market still get polled, and does 收起 stop it | `node feed-open-snooze.mjs $OUT/register.js <proj>` |
 
@@ -58,3 +59,16 @@ made against the real endpoint, not an estimate.
   `setState`, so it shows every frame the board *could* draw. That is what makes
   it the right tool for "is the animation correct" and the wrong one for "does
   the host paint it" — `remount.mjs` and `snooze.mjs` cover the second.
+
+## The stub host cannot answer everything
+
+`real-click.py` opens a real Claude Code in a pty, waits for the band, sends a
+real SGR mouse click and reads the screen back with `pyte` (`pip install --user
+pyte`). It exists because on 2026-09-16 every stub-host harness passed while the
+feature did nothing in the real app: the `ui.message` event reports `e.module` as
+`hooks/board.tsx`, and the hook was comparing it against the `./board.tsx`
+literal the `Client` prop carries. The stub host never had an opinion about that
+string, so it could not catch it.
+
+Rule of thumb: the `.mjs` harnesses prove the module's own logic; this one proves
+the engine and the module agree on what they hand each other.
