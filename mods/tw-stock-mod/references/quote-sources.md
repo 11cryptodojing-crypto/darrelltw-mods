@@ -19,8 +19,43 @@ route filled in a number.
 | **Yahoo** (default) | none | none | US: real-time. Taiwan: ~20 min behind | Yes, native | Yes, native | Yes | Config's own `"ex": "otc"` | `Yahoo 即時` (US) / `Yahoo 延遲` (Taiwan) |
 | **證交所 MIS** (backup, real-time, no account) | none | none | Real intraday (~5 s snapshot) | No — borrows one Yahoo call for this column only | No — same borrow, per-symbol | Yes (`y` field) | Config's own `"ex": "otc"`, on the `otc_` channel | `證交所 即時` |
 | **Quotes-file override** | depends on what writes it | depends on what writes it | Whatever the writer promises | Only if the writer fills `series` | Only if the writer fills `bars` | Only if the writer fills `prevClose` | Handled by the writer, before the file is written | `source` string in the file, or `報價檔` if it leaves that blank |
-| **永豐 Shioaji**, `twSource: "shioaji"` | 永豐金 brokerage account + API access | No — the band spawns and re-spawns it itself | Real intraday tick | No — the script does not fill it (unverified whether Shioaji itself carries one) | No — same | Yes (`contract.reference`) | Automatic — the SDK resolves it | `永豐 即時` |
+| **永豐 Shioaji**, `twSources: ["shioaji"]` | 永豐金 brokerage account + API access | No — the band spawns and re-spawns it itself | Real intraday tick | No — the script does not fill it (unverified whether Shioaji itself carries one) | No — same | Yes (`contract.reference`) | Automatic — the SDK resolves it | `永豐 即時` |
 | **Fugle 富果** (not wired) | Free Fugle membership | Whatever you write | Real intraday | Not from the one REST endpoint checked | Not from the one REST endpoint checked | Yes (`previousClose`) | Automatic — the symbol alone is enough | Whatever `source` your fetcher writes |
+
+## Preference order and the user-level file
+
+Taiwan's three built-in routes (Yahoo, MIS, Shioaji) are not a single choice
+any more - `twSources` is an ARRAY, in preference order: `["shioaji",
+"yahoo", "mis"]` tries Shioaji first, and for any tick Shioaji has nothing
+fresh for (the script has not logged in yet, or died) falls through to Yahoo,
+then MIS, without waiting out the full 120s staleness window. The footer's
+source tag always names whichever route actually answered that tick, never
+the one that was merely preferred. The shipped default is `["yahoo"]` alone;
+a legacy `"twSource": "x"` (singular, a string) is still read as an alias for
+`["x"]`.
+
+**Where a source order belongs: `~/.claude/stock-band.json`, not the
+project's.** Which broker you have an account with, and which route you'd
+rather try first, is a fact about the PERSON running the band, not about the
+project - so it lives in a user-level config file that is never inside a
+project and therefore never lands in version control:
+
+```jsonc
+// ~/.claude/stock-band.json
+{
+  "twSources": ["shioaji", "yahoo", "mis"],
+  "shioaji": { "python": "~/.venvs/shioaji/bin/python3", "env": "~/.sinobon.env", "interval": 10 }
+}
+```
+
+The band reads it via `$.env.get("HOME")` and merges it UNDER whatever the
+project's own `<project>/.claude/stock-band.json` says: built-in defaults <
+`~/.claude/stock-band.json` < the project file, key for key (a key only the
+user file states still applies; a key the project file also states wins).
+Any key is legal in either file - `twSources`/`shioaji` are simply the ones
+that most belong in the user-level one, so a shared project's config stays
+neutral and every contributor keeps their own order without editing a
+tracked file.
 
 ## 1. Yahoo (default)
 
@@ -43,7 +78,7 @@ why Taiwan also has an opt-in real-time route (§2).
 explicit about it in `<project>/.claude/stock-band.json`:
 
 ```jsonc
-{ "twSource": "yahoo" }
+{ "twSources": ["yahoo"] }
 ```
 
 **How to tell it took.** The footer reads `Yahoo 即時` on the US board and
@@ -57,7 +92,7 @@ official rate limit is published; the community number is roughly 360
 requests/hour, and the band's own budget of 300/hour (see §6) sits under it on
 purpose.
 
-## 2. 證交所 MIS (backup route, `"twSource": "mis"`)
+## 2. 證交所 MIS (backup route, `"twSources": ["mis"]`)
 
 No key, no account, nothing to run — same shape as Yahoo, but Taiwan-only and
 truly real-time. Yahoo stays the default (§1); reach for this when Yahoo's
@@ -66,14 +101,14 @@ truly real-time. Yahoo stays the default (§1); reach for this when Yahoo's
 **How to turn it on.** One line in `<project>/.claude/stock-band.json`:
 
 ```jsonc
-{ "twSource": "mis" }
+{ "twSources": ["mis"] }
 ```
 
 **What it does and does not carry.** One request answers the whole Taiwan
 watchlist plus 加權指數 and 櫃買指數 together — current price, previous close
 (`y`), open/high/low, volume, and the trade timestamp. It carries **no
 intraday series and no bars** — MIS is a snapshot, not a history. The `spark`
-trend column still needs a series, so turning it on with `twSource: "mis"`
+trend column still needs a series, so turning it on with `twSources: ["mis"]`
 makes the feed pay for one extra Yahoo call just for that column; the `kbar`
 column and the trend view already go to Yahoo per-symbol on both routes.
 
@@ -165,18 +200,19 @@ interface. The SDK's Python API is the whole interface, so a script that logs
 in once and stays running is the shape that fits, writing the override file
 from §3 on a loop.
 
-**Turn it on, managed by the band.** Set `"twSource": "shioaji"` in
-`<project>/.claude/stock-band.json` and point the `shioaji` block at your env
-file:
+**Turn it on, managed by the band.** Put `"twSources": ["shioaji", ...]` and
+the `shioaji` block in `~/.claude/stock-band.json` (not the project's - see
+[Preference order and the user-level file](#preference-order-and-the-user-level-file) above):
 
 ```jsonc
+// ~/.claude/stock-band.json
 {
-  "twSource": "shioaji",
+  "twSources": ["shioaji", "yahoo"],
   "shioaji": { "python": "python3", "env": "~/.sinobon.env", "interval": 10 }
 }
 ```
 
-Once Taiwan needs a feed, `hooks/register.tsx`'s `spawnShioaji` runs this
+Once Taiwan needs a feed, `hooks/register.tsx`'s `feedTwShioaji` runs this
 same script itself, detached (`$.process.run(['/bin/sh', '-c', 'nohup ... &'],
 ...)` — the `nohup`/`&` wrapper is what lets a one-shot `run()` call return
 while the script keeps going past it; see the function's own comment for why).
@@ -192,10 +228,16 @@ The band and the script then talk over two files instead of a socket:
 
 Respawn is rate-limited on the band's side too: once at session start, then
 only when the quotes file has gone stale (>120s) AND the last spawn attempt
-was more than 60 seconds ago — never more than once a minute. A missing
-`python` or env file logs a warning (`$.ui.log`) and falls back to Yahoo for
-that tick; it does not break the band. Script output goes to
-`.claude/stock-shioaji.log`, not to the band's own debug log.
+was more than 60 seconds ago — never more than once a minute. Whether or not
+a respawn was attempted, a stale tick makes `feedTwShioaji` report "nothing
+fresh" for that tick, and `feedTw`'s dispatcher falls through to the NEXT
+entry in `twSources` (e.g. `yahoo`) rather than waiting out the staleness
+window - this covers a missing `python`, a missing env file, or a dead login
+the same way, since all three look identical from here (the quotes file just
+never gets fresher). With only `["shioaji"]` configured, a stale tick falls
+all the way back to demo prices instead, the same as any other feed running
+dry. Script output goes to `.claude/stock-shioaji.log`, not to the band's own
+debug log.
 
 **Turn it on by hand**, the same script, started yourself:
 

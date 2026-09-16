@@ -1,12 +1,22 @@
 // Render the real board.tsx's pnl view against real props and print the 8
-// rows as text. Same stub host as board-harness.mjs, plus one extra step:
-// press the 損益 button (found in the first render's tree) before rendering,
-// so the module's own `view` state flips to 'pnl' the same way a real click
-// would, instead of poking at register.tsx's private state directly.
+// rows as text. Same stub host as board-harness.mjs, plus two extra steps:
+//
+// 1. Press the market button (key stock-band:market) through the real hook
+//    chain, same as a real click, until its label reads 台股庫存 ▾ - the pnl
+//    view is a stop in that cycle now, not a separate 損益 button. Asserts
+//    the stop is actually reached rather than looping forever.
+// 2. Optionally post a `{ sortPnl: key }` message straight into ui.message
+//    (the same message a header-cell click sends - see board.tsx's picker),
+//    to prove the sort/direction toggle without a pty.
+//
+// Usage: node pnl-harness.mjs <board.js> <register.js> <projectDir> [pluginRoot] [columns] [sortPnlKey ...]
+// Each extra trailing arg after columns is one more sortPnl press, applied
+// in order (so `today today` presses the same key twice: once to switch to
+// it, once more to flip its direction).
 import { readFile } from 'node:fs/promises'
 globalThis.h = (type, props, ...kids) => ({ type, props: props ?? {}, kids: kids.flat() })
 globalThis.Fragment = 'Fragment'
-const [, , boardPath, regPath, cfgPath, pluginRoot, colsArg] = process.argv
+const [, , boardPath, regPath, cfgPath, pluginRoot, colsArg, ...sortPresses] = process.argv
 const COLS = colsArg ? Number(colsArg) : 120
 
 // --- pull real props out of register.tsx -----------------------------------
@@ -39,17 +49,28 @@ async function render() {
   return { tree, props, buttons }
 }
 
-const first = await render()
-const pnlButton = first.buttons.find(b => b.props.label === '損益')
-if (!pnlButton) {
-  console.error('no 損益 button in the first render - buttons were:', first.buttons.map(b => b.props.label))
+// --- 1. cycle the market button until the 台股庫存 stop shows --------------
+let cur = await render()
+let presses = 0
+while (cur.props?.view !== 'pnl' && presses < 6) {
+  const marketButton = cur.buttons.find(b => b.key === 'stock-band:market' || b.props.label?.endsWith('▾'))
+  if (!marketButton) {
+    console.error('no market button found - buttons were:', cur.buttons.map(b => b.props.label))
+    process.exit(1)
+  }
+  marketButton.props.onPress()
+  presses += 1
+  cur = await render()
+}
+const marketLabel = cur.buttons.find(b => b.props.label?.endsWith('▾'))?.props.label
+console.log(`market button pressed ${presses}x -> label "${marketLabel}", view=${cur.props?.view}`)
+if (cur.props?.view !== 'pnl' || marketLabel !== '台股庫存 ▾') {
+  console.error(`FAIL: expected the pnl stop with label "台股庫存 ▾", got view=${cur.props?.view} label="${marketLabel}"`)
   process.exit(1)
 }
-pnlButton.props.onPress()
-const second = await render()
-console.log('buttons (pnl view):', second.buttons.map(b => b.props.label).join('  '))
+console.log('buttons (pnl stop):', cur.buttons.map(b => b.props.label).join('  '))
 
-// --- render the board's pnl view --------------------------------------------
+// --- 2. render the board's pnl view -----------------------------------------
 const board = (await import(boardPath)).default
 let state
 const surface = {
@@ -61,8 +82,6 @@ const surface = {
   every: () => () => {},
   onPointer: () => {},
 }
-board(second.props, surface) // first call seeds state
-const out = board(second.props, surface)
 
 function text(node, acc) {
   if (node == null || node === false) return acc
@@ -72,5 +91,29 @@ function text(node, acc) {
   for (const k of kids) text(k, acc)
   return acc
 }
-const rows = out.kids ?? []
-for (const row of rows) console.log('|' + text(row, []).join('') + '|')
+
+function printBoard(props, tag) {
+  console.log(`--- ${tag} (pnlSortKey=${props.pnlSortKey} pnlSortDir=${props.pnlSortDir}) ---`)
+  state = undefined
+  board(props, surface) // first call seeds state
+  const out = board(props, surface)
+  const rows = out.kids ?? []
+  for (const row of rows) console.log('|' + text(row, []).join('') + '|')
+}
+
+printBoard(cur.props, 'default sort')
+
+// --- 3. optional sortPnl presses, straight through ui.message --------------
+for (const key of sortPresses) {
+  const result = await handlers.get('ui.message')(
+    $,
+    { element: 'stock-band:table', module: 'hooks/board.tsx', data: { sortPnl: key } },
+    async () => ({ kids: [] }),
+  )
+  if (!result || typeof result !== 'object') {
+    console.error(`FAIL: ui.message did not accept { sortPnl: "${key}" }`)
+    process.exit(1)
+  }
+  cur = await render()
+  printBoard(cur.props, `after { sortPnl: "${key}" }`)
+}

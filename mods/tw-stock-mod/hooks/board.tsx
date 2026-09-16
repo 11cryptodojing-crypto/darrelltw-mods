@@ -45,6 +45,9 @@ export type QuoteRow = {
 /** a holding, already priced by register.tsx - the 損益 view only formats these */
 export type Holding = { code: string; name: string; qty: number; cost: number; price: number; prevClose: number }
 
+/** which pnl column `holdings` is sorted by - register.tsx does the actual sort, board only marks the header */
+export type PnlSortKey = 'code' | 'today' | 'todayPnl' | 'totalPnl' | 'totalPnlPct'
+
 export type BoardProps = {
   market: MarketId
   marketLabel: string
@@ -110,6 +113,9 @@ export type BoardProps = {
   holdingsSource: string
   /** epoch ms the holdings snapshot was taken; 0 when there is none */
   holdingsAt: number
+  /** already applied to `holdings` by register.tsx - board only marks the active header cell */
+  pnlSortKey: PnlSortKey
+  pnlSortDir: 'asc' | 'desc'
   /** which page of the holdings the pnl view is showing, and how many there are */
   holdingsPage: number
   holdingsPageCount: number
@@ -470,7 +476,9 @@ const frameClocks = new WeakMap<object, FrameClock>()
 // live on different clocks - the listener is installed once per instance and
 // outlives every page turn under it, so it must not close over one render's
 // rows or a click would open the symbol that used to be there.
-type Picker = { hit: (x: number, y: number) => number | undefined }
+/** what a click posts back to register.tsx's ui.message hook - a table row, or a pnl header cell */
+type PickResult = { pick: number } | { sortPnl: PnlSortKey }
+type Picker = { hit: (x: number, y: number) => PickResult | undefined }
 const pickers = new WeakMap<object, Picker>()
 
 // The table view lost its title row: the market name, session state and
@@ -666,38 +674,39 @@ function fitsTwoColumns(width: number): boolean {
 }
 
 // --- pnl (損益) layout -------------------------------------------------------
-// One column of right-anchored numeric fields, wider than the watchlist
-// table's (six numbers instead of two): 股數/成本/現價/今日%/損益/損益%. The
-// same right-to-left reservation style as `layout` above, capped so the
-// table does not stretch across a very wide terminal.
+// One column of right-anchored numeric fields: 張數/成本/現價/今日%/今日損益/
+// 總損益/損益%. The same right-to-left reservation style as `layout` above,
+// capped so the table does not stretch across a very wide terminal.
 type PnlLayout = {
   symCol: number
   nameCol: number
   qtyRight: number
   costRight: number
   priceRight: number
-  todayRight: number
-  pnlRight: number
-  pnlPctRight: number
+  todayPctRight: number
+  todayPnlRight: number
+  totalPnlRight: number
+  totalPnlPctRight: number
   showName: boolean
 }
 
 // Field-width budget, right to left (each gap is the field's own width + one
-// column of air before the next field starts): pnlPct 8 ("+100.00%"), pnl 12
-// ("+9,999,999" plus room), today% 8, price 9 ("99,999.00" - 成本/現價 always
-// carry 2 decimals now, see priceDecimals in the pnl branch), cost 9, qty 8
-// ("999,999"), name 12 (up to ~6 CJK characters), sym 6 - this adds up to
-// exactly 79 columns, which is why `nameCol` and every `*Right` below line up
-// with an 80-column band with nothing left over. A name here used to collide
-// with the qty column at 80 columns (元大台灣50 10,000 -> "元大台灣5010,000")
-// because the old budget gave name+qty only 14 columns combined; this one
-// gives them 12+1+8 = 21.
+// column of air before the next field starts): 損益% 8 ("+100.00%"), 總損益
+// 12 ("+9,999,999" plus room), 今日損益 12 (same shape as 總損益), 今日% 8,
+// 現價 9 ("99,999.00" - 成本/現價 always carry 2 decimals, see priceDecimals
+// in the pnl branch), 成本 9, 張數 6 ("999.9" - qty/1000, at most one decimal
+// - see qtyLabel), name 12 (up to ~6 CJK characters), sym 6. Without the
+// name column this is 77 of an 80-column band (name needs another 13, which
+// an 80-column band does not have) - `showName` drops it there the same way
+// the watchlist table's own `showName` does, rather than let it collide with
+// 張數 the way it once did (元大台灣50 10,000 -> "元大台灣5010,000").
 function pnlLayout(width: number): PnlLayout {
   const w = Math.max(60, width)
-  const pnlPctRight = Math.min(w - 1, 90)
-  const pnlRight = pnlPctRight - 9
-  const todayRight = pnlRight - 13
-  const priceRight = todayRight - 9
+  const totalPnlPctRight = Math.min(w - 1, 96)
+  const totalPnlRight = totalPnlPctRight - 9
+  const todayPnlRight = totalPnlRight - 13
+  const todayPctRight = todayPnlRight - 13
+  const priceRight = todayPctRight - 9
   const costRight = priceRight - 10
   const qtyRight = costRight - 10
   const nameCol = 8
@@ -707,11 +716,18 @@ function pnlLayout(width: number): PnlLayout {
     qtyRight,
     costRight,
     priceRight,
-    todayRight,
-    pnlRight,
-    pnlPctRight,
+    todayPctRight,
+    todayPnlRight,
+    totalPnlRight,
+    totalPnlPctRight,
     showName: qtyRight - nameCol >= 13,
   }
+}
+
+/** `張數`: qty/1000, one decimal only when it is not a whole 張 (e.g. `2` or `0.5`) */
+function qtyLabel(qty: number): string {
+  const lots = qty / 1000
+  return Number.isInteger(lots) ? String(lots) : lots.toFixed(1)
 }
 
 function hhmmLocal(ms: number): string {
@@ -898,8 +914,8 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     picker = own
     surface.onPointer(e => {
       if (e.type !== 'down' || e.button !== 'left') return
-      const index = own.hit(e.x, e.y)
-      if (index !== undefined) surface.post({ pick: index })
+      const result = own.hit(e.x, e.y)
+      if (result !== undefined) surface.post(result)
     })
   }
 
@@ -1060,19 +1076,17 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     // to pick; the named buttons above the band move between symbols instead
     picker.hit = () => undefined
   } else if (props.view === 'pnl') {
-    // No click targets yet (item 8 of the spec) - the pnl view's own paging
-    // button lives in the button row register.tsx draws above this Client.
-    picker.hit = () => undefined
-
     const lay = pnlLayout(surface.columns || 80)
     // 成本/現價 reuse the table's own price formatter - `thousands()` with no
     // decimals argument, i.e. always 2, the same call the watchlist table's
     // price column makes regardless of market (e.g. 2,436.04). `decimals`
-    // stays market-dependent for money that is NOT a price - 損益 and the
-    // totals row read as integer TWD, the same way the rest of the band's
-    // TWD figures do (US keeps cents throughout).
+    // stays market-dependent for money that is NOT a price - 今日損益/總損益
+    // and the totals row read as integer TWD, the same way the rest of the
+    // band's TWD figures do (US keeps cents throughout).
     const priceDecimals = 2
     const decimals = props.market === 'us' ? 2 : 0
+    // register.tsx has already sorted the full list by props.pnlSortKey/Dir -
+    // this only slices the page and marks which header is active.
     const holdings = props.holdings
     const page = holdings.slice(props.holdingsPage * PNL_PAGE_SIZE, props.holdingsPage * PNL_PAGE_SIZE + PNL_PAGE_SIZE)
 
@@ -1089,16 +1103,41 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     )
 
     // row 1: column headers, right-anchored the same way the watchlist
-    // table's are.
+    // table's are. Five of them are sortable - the active one carries an
+    // arrow (↓/↑) the way the watchlist header marks `↓變更%`, and this
+    // records each sortable cell's own column span so the picker below can
+    // hit-test a click against it without duplicating this layout a second
+    // time.
     const head = rows[1]
-    head.put(lay.symCol, '代號', HEAD)
-    head.put(lay.nameCol, '名稱', HEAD)
-    head.putRight(lay.qtyRight, '股數', HEAD)
+    const sortHits: { key: PnlSortKey; x0: number; x1: number }[] = []
+    const arrow = props.pnlSortDir === 'desc' ? '↓' : '↑'
+    const sortable = (key: PnlSortKey, label: string) => (props.pnlSortKey === key ? `${arrow}${label}` : label)
+    const putLeftSortable = (col: number, key: PnlSortKey, label: string) => {
+      const text = sortable(key, label)
+      head.put(col, text, HEAD)
+      sortHits.push({ key, x0: col, x1: col + dispWidth(text) })
+    }
+    const putRightSortable = (right: number, key: PnlSortKey, label: string) => {
+      const text = sortable(key, label)
+      head.putRight(right, text, HEAD)
+      sortHits.push({ key, x0: right - dispWidth(text), x1: right })
+    }
+    putLeftSortable(lay.symCol, 'code', '代號')
+    if (lay.showName) head.put(lay.nameCol, '名稱', HEAD)
+    head.putRight(lay.qtyRight, '張數', HEAD)
     head.putRight(lay.costRight, '成本', HEAD)
     head.putRight(lay.priceRight, '現價', HEAD)
-    head.putRight(lay.todayRight, '今日%', HEAD)
-    head.putRight(lay.pnlRight, '損益', HEAD)
-    head.putRight(lay.pnlPctRight, '損益%', HEAD)
+    putRightSortable(lay.todayPctRight, 'today', '今日%')
+    putRightSortable(lay.todayPnlRight, 'todayPnl', '今日損益')
+    putRightSortable(lay.totalPnlRight, 'totalPnl', '總損益')
+    putRightSortable(lay.totalPnlPctRight, 'totalPnlPct', '損益%')
+    // header cells only - no row is a click target yet (item 8 of the
+    // original spec still holds for the data rows themselves)
+    picker.hit = (x, y) => {
+      if (y !== 1) return undefined
+      const hit = sortHits.find(h => x >= h.x0 && x < h.x1)
+      return hit ? { sortPnl: hit.key } : undefined
+    }
 
     if (holdings.length === 0) {
       rows[2].put(
@@ -1113,17 +1152,19 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
       for (let i = 0; i < page.length; i++) {
         const h = page[i]
         const r = rows[2 + i]
-        const pnlAbs = (h.price - h.cost) * h.qty
-        const pnlPct = h.cost ? (h.price / h.cost - 1) * 100 : 0
+        const todayPnl = (h.price - h.prevClose) * h.qty
+        const totalPnl = (h.price - h.cost) * h.qty
+        const totalPnlPct = h.cost ? (h.price / h.cost - 1) * 100 : 0
         const todayPct = h.prevClose ? (h.price / h.prevClose - 1) * 100 : 0
         r.put(lay.symCol, h.code, SYMBOL)
         if (lay.showName) r.put(lay.nameCol, h.name, WHITE)
-        r.putRight(lay.qtyRight, thousands(h.qty, 0), WHITE)
+        r.putRight(lay.qtyRight, qtyLabel(h.qty), WHITE)
         r.putRight(lay.costRight, thousands(h.cost, priceDecimals), DIM)
         r.putRight(lay.priceRight, thousands(h.price, priceDecimals), WHITE)
-        r.putRight(lay.todayRight, pct(todayPct), tone(props.market, todayPct))
-        r.putRight(lay.pnlRight, signed(pnlAbs, decimals), tone(props.market, pnlAbs))
-        r.putRight(lay.pnlPctRight, pct(pnlPct), tone(props.market, pnlPct))
+        r.putRight(lay.todayPctRight, pct(todayPct), tone(props.market, todayPct))
+        r.putRight(lay.todayPnlRight, signed(todayPnl, decimals), tone(props.market, todayPnl))
+        r.putRight(lay.totalPnlRight, signed(totalPnl, decimals), tone(props.market, totalPnl))
+        r.putRight(lay.totalPnlPctRight, pct(totalPnlPct), tone(props.market, totalPnlPct))
       }
     }
 
@@ -1145,7 +1186,7 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     put(thousands(value, decimals), WHITE)
     put('  成本 ', DIM)
     put(thousands(cost, decimals), WHITE)
-    put('  損益 ', DIM)
+    put('  總損益 ', DIM)
     put(`${signed(pnlTotal, decimals)} (${pct(pnlTotalPct)})`, tone(props.market, pnlTotal))
     put('  今日 ', DIM)
     put(signed(todayTotal, decimals), tone(props.market, todayTotal))
@@ -1172,7 +1213,7 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
       const row = y - 2
       if (row < 0 || row >= TABLE_QUOTE_ROWS) return undefined
       const index = halves && x > halves[0].pctRight ? row + TABLE_QUOTE_ROWS : row
-      return index < pickable ? index : undefined
+      return index < pickable ? { pick: index } : undefined
     }
 
     const head = rows[0]

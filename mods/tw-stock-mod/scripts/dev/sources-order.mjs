@@ -1,0 +1,141 @@
+// Proves twSources' merge/alias/default/fallthrough semantics against the
+// REAL register.tsx (bundled), with a stub host that fakes the user-level
+// and project config files, $.env.get("HOME"), $.session.cwd and
+// $.process.run (so no real shioaji script or ~/.claude file is touched),
+// but hits the real Yahoo/MIS endpoints the same way harness.mjs does.
+//
+// Usage: node sources-order.mjs <register.js>
+import { pathToFileURL } from 'node:url'
+
+const [, , modPath] = process.argv
+globalThis.h = (type, props, ...kids) => ({ type, props: props ?? {}, kids: kids.flat() })
+globalThis.Fragment = 'Fragment'
+
+function findClient(node) {
+  if (!node || typeof node !== 'object') return undefined
+  if (node.type === 'Client') return node
+  for (const k of node.kids ?? []) {
+    const hit = findClient(k)
+    if (hit) return hit
+  }
+  return undefined
+}
+
+let moduleTick = 0
+
+async function runCase(label, { userText, projectText, quotesText } = {}) {
+  const home = '/fake-home'
+  const cwd = '/fake-project'
+  const files = {}
+  if (userText !== undefined) files[`${home}/.claude/stock-band.json`] = userText
+  if (projectText !== undefined) files['.claude/stock-band.json'] = projectText
+  if (quotesText !== undefined) files['.claude/stock-quotes.json'] = quotesText
+
+  const logs = []
+  const processRuns = []
+  const $ = {
+    clock: { now: async () => Date.now(), every: () => {} },
+    fs: {
+      read: async path => {
+        if (path in files) return files[path]
+        throw new Error('ENOENT ' + path)
+      },
+      write: async (path, text) => {
+        files[path] = text
+      },
+    },
+    env: { get: async name => (name === 'HOME' ? home : undefined) },
+    session: { cwd: async () => cwd },
+    process: {
+      run: async (argv, init) => {
+        processRuns.push({ argv, init })
+        return { exitCode: 0, stdout: '', stderr: '' }
+      },
+    },
+    plugin: { root: '/fake-plugin-root' },
+    ui: {
+      log: m => logs.push(m),
+      invalidate: () => {},
+      resolve: async () => ({ Box: 'Box', Button: 'Button', Client: 'Client', Text: 'Text' }),
+    },
+    http: {
+      fetch: async (url, init) => {
+        const res = await fetch(url, { headers: init?.headers })
+        const text = await res.text()
+        logs.push(`FETCH ${res.status} ${url}`)
+        return { ok: res.ok, status: res.status, text }
+      },
+    },
+  }
+
+  // A fresh module instance per case - register.tsx keeps module-level
+  // mutable state (config, lastFile, liveBy, ...) that must not leak
+  // between cases sharing one process.
+  moduleTick += 1
+  const url = pathToFileURL(modPath)
+  url.search = `?case=${moduleTick}`
+  const { register } = await import(url.href)
+
+  const handlers = new Map()
+  register((event, a, b) => handlers.set(event, typeof a === 'function' ? a : b))
+  const next = async e => ({ type: 'next', props: {}, kids: [] })
+  await handlers.get('session.start')($, {}, next)
+  // session.start already awaits its own first feed() to completion before
+  // returning, so no extra wait should be needed - this is a small buffer
+  // against anything unawaited rather than a load-bearing delay.
+  await new Promise(r => setTimeout(r, 200))
+
+  const tree = await handlers.get('ui.render')($, { props: {}, surface: 'terminal', viewport: { columns: 100 } }, next)
+  const client = findClient(tree)
+  const p = client?.props?.props
+
+  console.log(`=== ${label} ===`)
+  console.log(`market=${p?.market} source=${p?.source} sourceLabel=${p?.sourceLabel}`)
+  console.log(`process.run calls: ${processRuns.length}` + (processRuns[0] ? ` (argv[3..5]: ${processRuns[0].argv.slice(3, 6).join(' ')})` : ''))
+  const fetches = logs.filter(l => l.startsWith('FETCH'))
+  for (const f of fetches) console.log(f.replace(/&_=\d+/, '').slice(0, 100))
+  console.log()
+  return { p, logs, processRuns }
+}
+
+// (a) user file + project file merge, project wins: user sets twSources
+// ["mis"] and market "us"; project sets only market "tw" - the merged
+// config must fetch Taiwan (project's market wins) through MIS (only the
+// user file states twSources at all).
+const a = await runCase('(a) user+project merge, project market wins, user twSources applies', {
+  userText: JSON.stringify({ twSources: ['mis'], market: 'us' }),
+  projectText: JSON.stringify({ market: 'tw' }),
+})
+const aOk = a.p?.market === 'tw' && a.logs.some(l => l.includes('mis.twse.com.tw'))
+console.log(`(a) PASS=${aOk}\n`)
+
+// (b) legacy singular twSource -> ["mis"]
+const b = await runCase('(b) twSource: "mis" aliases to ["mis"]', {
+  projectText: JSON.stringify({ market: 'tw', twSource: 'mis' }),
+})
+const bOk = b.logs.some(l => l.includes('mis.twse.com.tw'))
+console.log(`(b) PASS=${bOk}\n`)
+
+// (c) default is ["yahoo"] with no twSources/twSource stated at all
+const c = await runCase('(c) default twSources is ["yahoo"]', {
+  projectText: JSON.stringify({ market: 'tw' }),
+})
+const cOk = c.logs.some(l => l.includes('query1.finance.yahoo.com')) && c.p?.sourceLabel === 'Yahoo 延遲'
+console.log(`(c) PASS=${cOk}\n`)
+
+// (d) ["shioaji", "yahoo"] with no quotes file (shioaji has nothing fresh) -
+// the tick must fall through to yahoo THIS SAME TICK and the footer must
+// read Yahoo 延遲, not demo prices.
+const d = await runCase('(d) shioaji stale falls through to yahoo this tick', {
+  projectText: JSON.stringify({
+    market: 'tw',
+    twSources: ['shioaji', 'yahoo'],
+    shioaji: { python: 'python3', env: '/nonexistent-env-file', interval: 10 },
+  }),
+})
+const dOk = d.processRuns.length === 1 && d.logs.some(l => l.includes('query1.finance.yahoo.com')) && d.p?.sourceLabel === 'Yahoo 延遲'
+console.log(`(d) PASS=${dOk}\n`)
+
+const allOk = aOk && bOk && cOk && dOk
+console.log(allOk ? 'ALL PASS' : 'SOME FAILED')
+process.exit(allOk ? 0 : 1)

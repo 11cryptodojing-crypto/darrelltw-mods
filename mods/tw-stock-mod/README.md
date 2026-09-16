@@ -12,9 +12,9 @@ swaps the table for one symbol's K bars.
 **Both markets are live, each from its own source, and the footer says which.**
 Both read Yahoo's public endpoints by default (`Yahoo 即時` for the US,
 `Yahoo 延遲` for Taiwan, since Yahoo's Taiwan quotes run about twenty minutes
-behind) — no key and no account either way. Set `"twSource": "mis"` for a
+behind) — no key and no account either way. Set `"twSources": ["mis"]` for a
 backup real-time route through the exchange's own intraday endpoint
-(`證交所 即時`, still no key or account), or `"twSource": "shioaji"` for real
+(`證交所 即時`, still no key or account), or `"twSources": ["shioaji"]` for real
 intraday ticks through a 永豐 brokerage account — the band runs the fetcher
 itself (`永豐 即時`). A market the feed cannot reach falls back to a
 deterministic sine walk off each symbol's previous close and the footer says
@@ -214,7 +214,16 @@ between symbols from there.
 
 Everything has a default; the band works with no config at all. To change the
 watchlist, copy [`stock-band.example.json`](stock-band.example.json) to
-`<project>/.claude/stock-band.json`:
+`<project>/.claude/stock-band.json`.
+
+**Two config files, merged.** `~/.claude/stock-band.json` (a USER-level file,
+never inside a project — outside version control) is read first, then
+`<project>/.claude/stock-band.json` on top of it: any key the project file
+states wins, and any key only the user file states still applies. Your own
+source order and broker paths (`twSources`, `shioaji`) belong in the
+user-level file, so a shared project's config stays neutral and each person
+who opens it keeps their own preference — see
+[Your own source order](#your-own-source-order).
 
 | key | default | meaning |
 | --- | --- | --- |
@@ -224,8 +233,8 @@ watchlist, copy [`stock-band.example.json`](stock-band.example.json) to
 | `highlight` | `true` | highlight the biggest mover's row (single-column table only) |
 | `columns` | `"auto"` | how many symbols a row draws: `auto` = 1 when the watchlist is 5 symbols or fewer, 2 for 6 or more; `1`/`2` force it (the board still falls back to 1 if the terminal is too narrow — see [What the band shows](#what-the-band-shows)) |
 | `feed` | `"auto"` | `auto` prices whichever market is on the band; `both` keeps the other side warm; `tw`/`us` pins one; `off` = demo prices only |
-| `twSource` | `"yahoo"` | `yahoo` (default) = Yahoo, ~20 min behind Taiwan but one request whatever the list length; `mis` = 證交所 intraday, real time, a backup route; `shioaji` = 永豐 real-time ticks, the band runs the fetcher itself — see [永豐 Shioaji as that fetcher](#永豐-shioaji-as-that-fetcher) |
-| `shioaji` | `{ "python": "python3", "env": "~/.sinobon.env", "interval": 10 }` | `twSource: "shioaji"` only — the interpreter, the env file holding `SINOBON_API_KEY`/`SINOBON_SECRET_KEY` (`~` expands to `$HOME`), and seconds between snapshots |
+| `twSources` | `["yahoo"]` | Taiwan's routes, in preference order — the band tries the first and falls through to the next for a tick that one has nothing fresh for. `yahoo` = Yahoo, ~20 min behind Taiwan but one request whatever the list length; `mis` = 證交所 intraday, real time, a backup route; `shioaji` = 永豐 real-time ticks, the band runs the fetcher itself — see [永豐 Shioaji as that fetcher](#永豐-shioaji-as-that-fetcher). A legacy `"twSource": "x"` (a single string) still works as an alias for `["x"]`. The shipped default never includes `shioaji`/`mis` — put those in your own `~/.claude/stock-band.json` |
+| `shioaji` | `{ "python": "python3", "env": "~/.sinobon.env", "interval": 10 }` | read only when `"shioaji"` is somewhere in `twSources` — the interpreter, the env file holding `SINOBON_API_KEY`/`SINOBON_SECRET_KEY` (`~` expands to `$HOME`), and seconds between snapshots |
 | `feedMs` | `30000` | seconds between feed requests, in ms (floor 15000 — below that Yahoo answers 429; the request budget can widen it further) |
 | `pageMs` | `10000` | how long one page holds before the board turns, in ms (floor 4000; `0` turns auto-paging off and leaves `翻頁` as the only way to page). Pressing `翻頁` restarts this countdown |
 | `tw` / `us` | built-in lists | `{ code, name, prevClose }` per symbol; only `code` is required. Taiwan 上櫃 symbols need `"ex": "otc"` (e.g. 6488 環球晶) |
@@ -243,6 +252,28 @@ on its own — an interval cannot be reset, so pressing the button 9.9 s into a
 the interval fired and took it away. The check rides the `refreshMs` poll
 rather than owning a timer, so an automatic turn lands up to `refreshMs` after
 its deadline: with the defaults, a page holds 10–13 s instead of exactly 10.
+
+### Your own source order
+
+A source order is a personal preference, not a project one — the person
+running the band is who has (or does not have) a 永豐 account, not the
+repository. Put `twSources` and `shioaji` in `~/.claude/stock-band.json`
+instead of the project's own `stock-band.json`:
+
+```jsonc
+// ~/.claude/stock-band.json - never in a repo, one per person
+{
+  "twSources": ["shioaji", "yahoo", "mis"],
+  "shioaji": { "python": "~/.venvs/shioaji/bin/python3", "env": "~/.sinobon.env", "interval": 10 }
+}
+```
+
+Every project that has no `twSources` of its own then uses this order, and
+the project's `stock-band.json` stays free to commit — it never has to name
+a broker account or a path only one contributor's machine has. A project
+that DOES set its own `twSources` (or the legacy `twSource`) still overrides
+this, key for key: see the merge order at the top of
+[Configure](#configure).
 
 ## The live feed
 
@@ -267,14 +298,14 @@ instead of leaving it on demo prices until the next tick.
   tick the same way a 20-symbol US list would. Yahoo's Taiwan quotes are about
   twenty minutes old (measured 2026-09-16: Yahoo said 10:29:05 while 證交所
   MIS said 10:48:36).
-- **Taiwan: `"twSource": "mis"`, a backup real-time route through the
+- **Taiwan: `"twSources": ["mis"]`, a backup real-time route through the
   exchange, one request whatever the list length.** `mis.twse.com.tw` answers
   the whole watchlist plus 加權指數 (`t00`) and 櫃買指數 (`o00`) in one call,
   with the real last trade behind it, and has no 20-symbol batching cap of
   its own. Two MIS fields need care: `z` reads `-` between trades, so the
   last actual deal comes from `trade.z`, and 上櫃 symbols answer on the
   `otc_` channel rather than `tse_`.
-- **Taiwan: `"twSource": "shioaji"` for 永豐's own real-time ticks — the band
+- **Taiwan: `"twSources": ["shioaji"]` for 永豐's own real-time ticks — the band
   runs the fetcher, you never touch a terminal.** See
   [永豐 Shioaji as that fetcher](#永豐-shioaji-as-that-fetcher); the built-in
   HTTP feed (Yahoo, MIS) does not run for Taiwan on this route, only the
@@ -282,7 +313,7 @@ instead of leaving it on demo prices until the next tick.
 - **K bars cost extra, so they are fetched only when the chart view wants
   them** — one request for the one symbol it is drawing. MIS carries no K
   bars at all, so the chart view always goes to Yahoo per symbol, whichever
-  `twSource` prices the table.
+  `twSources` prices the table.
 - **Rate limits are real.** A request with no browser `User-Agent` gets 429 on
   the first try, and the ban lasts minutes. Every non-2xx doubles the wait, up
   to 5 minutes.
@@ -300,7 +331,7 @@ Replace the whole list with `twIndices` in your config:
 
 ```json
 {
-  "twSource": "mis",
+  "twSources": ["mis"],
   "twIndices": [
     { "code": "t00", "name": "TAIEX" },
     { "code": "t24", "name": "SEMI" },
@@ -352,7 +383,7 @@ Three things to know before you go long:
   TAIEX alone, and even that disagrees with the exchange: on 2026-09-16 Yahoo's
   `^TWII` reported the previous close as 45,862.5 against the exchange's
   45,511.49, which turned a +337 point day into −13.6 on the band. If the
-  Taiwan footer matters to you, set `"twSource": "mis"`.
+  Taiwan footer matters to you, set `"twSources": ["mis"]`.
 
 A code the exchange does not recognise simply answers nothing and that row is
 left out, so a typo costs one missing index rather than the whole footer.
@@ -438,14 +469,20 @@ ready to run. It reads the same `tw` watchlist out of your `stock-band.json`,
 logs in once, and rewrites the quotes file (and the holdings file, see
 [Holdings and the 損益 view](#holdings-and-the-損益-view)) on a loop.
 
-**Managed by the band (recommended):** set `"twSource": "shioaji"` and a
-`shioaji` block in `stock-band.json` (see [Configure](#configure)) —
-`hooks/register.tsx` spawns this exact script itself once Taiwan needs a
-feed, detached from the session, and keeps it fed with a heartbeat file
-(`.claude/stock-band.heartbeat`) so it exits on its own once nothing is
+**Managed by the band (recommended):** put `"twSources": ["shioaji", ...]`
+and a `shioaji` block in `~/.claude/stock-band.json` (see
+[Your own source order](#your-own-source-order) — this is a personal
+preference, so the user-level file is where it belongs, not a project's own
+config) — `hooks/register.tsx` spawns this exact script itself once Taiwan
+needs a feed, detached from the session, and keeps it fed with a heartbeat
+file (`.claude/stock-band.heartbeat`) so it exits on its own once nothing is
 watching anymore. A `.claude/stock-shioaji.pid` file keeps two Claude Code
 sessions on the same project from logging in twice. Nothing to run by hand;
-script output lands in `.claude/stock-shioaji.log`.
+script output lands in `.claude/stock-shioaji.log`. While the quotes file is
+stale (the script has not logged in yet, or died), the band does not wait it
+out: it falls through to the next entry in `twSources` for that tick (e.g.
+`["shioaji", "yahoo"]` shows `Yahoo 延遲` prices in the meantime), and the
+override file wins back over that the moment it is fresh again.
 
 **By hand**, same script, your own terminal:
 
@@ -462,7 +499,7 @@ call.** The `shioaji` command the package installs prints `Hello from shioaji!`
 and nothing else — the SDK is the whole interface, it is Python, and its login
 takes seconds and holds a session, so it cannot live inside a hooks module that
 fetches every 30 seconds. A long-lived script writing the override file is the
-shape that fits; `twSource: "shioaji"` is the band running that same shape
+shape that fits; `twSources: ["shioaji"]` is the band running that same shape
 itself instead of asking you to.
 
 What it buys you over the built-in 證交所 route: 永豐 quotes come with the

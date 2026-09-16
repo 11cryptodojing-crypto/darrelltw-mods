@@ -30,9 +30,9 @@ description: 引導使用者設定 tw-stock-mod 的台股／美股觀察清單
 
 ### 3a. 台股：打證交所 MIS
 
-band 的台股報價預設走 Yahoo（`twSource: "yahoo"`，見 3b），但驗證代號還是用證交所
-MIS 這支端點——它是即時的，能馬上看出代號打對了沒，設定 `twSource: "mis"`（備用即時路線）
-或 `twSource: "shioaji"`（永豐即時，見 README）時也是走同一批代號。
+band 的台股報價預設走 Yahoo（`twSources: ["yahoo"]`，見 3b），但驗證代號還是用證交所
+MIS 這支端點——它是即時的，能馬上看出代號打對了沒，設定 `twSources: ["mis"]`（備用即時路線）
+或 `twSources: ["shioaji"]`（永豐即時，見 README）時也是走同一批代號。
 每個代號**同時查上市和上櫃兩個頻道**，因為代號本身看不出是哪一種：
 
 ```
@@ -81,3 +81,7 @@ Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)
 ## 5. 提醒使用者重新載入
 
 設定寫完後，提醒使用者跑一次 `/reload-plugins`。刷新頻率（`refreshMs`／`feedMs`）是 session 一開始就固定的，改了設定檔要重新載入 plugin 才會生效，單純等下一輪 poll 是吃不到新設定的。
+
+## 附註：`twSources`（報價來源順序）別寫進專案設定檔
+
+`twSources`（例如 `["shioaji", "yahoo", "mis"]`）跟 `shioaji` 區塊是**個人偏好**，不是專案設定——band 讀 `~/.claude/stock-band.json`（使用者層級，不進版本控制）疊在 `<project>/.claude/stock-band.json` 之下再合併。如果使用者要設定報價來源順序或永豐帳號路徑，寫進 `~/.claude/stock-band.json`，不要寫進這裡正在編輯的專案檔——這樣專案設定才能保持中立，其他人打開同一個專案時用的是他自己的順序。細節見 README 的「Your own source order」與 `references/quote-sources.md` 的「Preference order and the user-level file」。
