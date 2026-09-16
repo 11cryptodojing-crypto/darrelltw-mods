@@ -537,6 +537,12 @@ type Config = {
    * See parseHoldings and the README's 損益 section.
    */
   holdings: Record<MarketId, Holding[]>
+  /**
+   * `"config"` makes the `holdings` block above win over the holdings file
+   * the broker script keeps writing - the way to show a demo portfolio on a
+   * band whose Taiwan route is a live brokerage. Default `"file"`.
+   */
+  holdingsSource: 'file' | 'config'
 }
 
 type ShioajiConfig = {
@@ -608,6 +614,7 @@ function defaultConfig(): Config {
     lists: { tw: TW_LIST, us: US_LIST },
     shioaji: { python: 'python3', env: '~/.sinobon.env', interval: 10 },
     holdings: { tw: [], us: [] },
+    holdingsSource: 'file',
   }
 }
 
@@ -730,6 +737,7 @@ function parseConfigRoot(root: Record<string, unknown> | undefined): Config {
     tw: parseHoldingsList(holdings?.tw),
     us: parseHoldingsList(holdings?.us),
   }
+  if (root.holdingsSource === 'config') cfg.holdingsSource = 'config'
   return cfg
 }
 
@@ -949,10 +957,13 @@ function holdingsFor(
   file: HoldingsFile | undefined,
   cfg: Config,
 ): { holdings: Holding[]; source: string; asOf: number } {
+  const manual = cfg.holdings[market]
+  if (cfg.holdingsSource === 'config' && manual.length > 0) {
+    return { holdings: manual, source: '手動設定', asOf: 0 }
+  }
   if (file && (!file.market || file.market === market)) {
     return { holdings: file.holdings, source: file.source ?? '庫存檔', asOf: file.asOf }
   }
-  const manual = cfg.holdings[market]
   return { holdings: manual, source: manual.length > 0 ? '手動設定' : '', asOf: 0 }
 }
 

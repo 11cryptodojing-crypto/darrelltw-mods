@@ -12,6 +12,8 @@
   "shioaji": { "python": "python3", "env": "~/.sinobon.env", "interval": 10 },
   "_holdings_comment": "The 損益 view's manual alternative to stock-holdings.json (which wins for whichever market it names). qty is shares, not 張; cost is the average cost per share.",
   "holdings": { "tw": [], "us": [] },
+  "_holdingsSource_comment": "\"file\" (default): the holdings file the broker script writes wins. \"config\": the holdings block above wins - use it to show a demo portfolio while the Taiwan route is a live brokerage.",
+  "holdingsSource": "file",
   "_twIndices_comment": "Taiwan footer indices, MIS route only. First entry is the headline index; names must be Latin (the split-flap board cannot turn a Chinese character). 146 channels exist - see the README.",
   "twIndices": [
     {
