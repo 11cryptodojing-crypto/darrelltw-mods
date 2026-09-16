@@ -12,12 +12,19 @@ swaps the table for one symbol's K bars.
 **Both markets are live, each from its own source, and the footer says which.**
 Both read Yahoo's public endpoints by default (`Yahoo 即時` for the US,
 `Yahoo 延遲` for Taiwan, since Yahoo's Taiwan quotes run about twenty minutes
-behind) — no key and no account either way. Set `"twSource": "mis"` to read
-Taiwan from the exchange's own real-time intraday endpoint instead
-(`證交所 即時`). A market the feed cannot reach falls back to a deterministic
-sine walk off each symbol's previous close and the footer says
+behind) — no key and no account either way. Set `"twSource": "mis"` for a
+backup real-time route through the exchange's own intraday endpoint
+(`證交所 即時`, still no key or account), or `"twSource": "shioaji"` for real
+intraday ticks through a 永豐 brokerage account — the band runs the fetcher
+itself (`永豐 即時`). A market the feed cannot reach falls back to a
+deterministic sine walk off each symbol's previous close and the footer says
 `示範資料（未接 API）`, so the tag always tells you what you are looking at.
 See [The live feed](#the-live-feed).
+
+**損益 shows your holdings, not just the watchlist.** The 損益 button next to
+趨勢圖 opens a P&L table — 股數/成本/現價/今日%/損益/損益% per position, plus a
+portfolio total — read from `<project>/.claude/stock-holdings.json` (or a
+`holdings` block in `stock-band.json`). See [Holdings and the 損益 view](#holdings-and-the-損益-view).
 
 Layout, colors and badges are ported from
 [`prototype/stock-band-demo.py`](prototype/stock-band-demo.py) — read that
@@ -217,11 +224,13 @@ watchlist, copy [`stock-band.example.json`](stock-band.example.json) to
 | `highlight` | `true` | highlight the biggest mover's row (single-column table only) |
 | `columns` | `"auto"` | how many symbols a row draws: `auto` = 1 when the watchlist is 5 symbols or fewer, 2 for 6 or more; `1`/`2` force it (the board still falls back to 1 if the terminal is too narrow — see [What the band shows](#what-the-band-shows)) |
 | `feed` | `"auto"` | `auto` prices whichever market is on the band; `both` keeps the other side warm; `tw`/`us` pins one; `off` = demo prices only |
-| `twSource` | `"yahoo"` | `yahoo` = Yahoo (~20 min behind Taiwan, but one request whatever the list length); `mis` = 證交所 intraday (real time) |
+| `twSource` | `"yahoo"` | `yahoo` (default) = Yahoo, ~20 min behind Taiwan but one request whatever the list length; `mis` = 證交所 intraday, real time, a backup route; `shioaji` = 永豐 real-time ticks, the band runs the fetcher itself — see [永豐 Shioaji as that fetcher](#永豐-shioaji-as-that-fetcher) |
+| `shioaji` | `{ "python": "python3", "env": "~/.sinobon.env", "interval": 10 }` | `twSource: "shioaji"` only — the interpreter, the env file holding `SINOBON_API_KEY`/`SINOBON_SECRET_KEY` (`~` expands to `$HOME`), and seconds between snapshots |
 | `feedMs` | `30000` | seconds between feed requests, in ms (floor 15000 — below that Yahoo answers 429; the request budget can widen it further) |
 | `pageMs` | `10000` | how long one page holds before the board turns, in ms (floor 4000; `0` turns auto-paging off and leaves `翻頁` as the only way to page). Pressing `翻頁` restarts this countdown |
 | `tw` / `us` | built-in lists | `{ code, name, prevClose }` per symbol; only `code` is required. Taiwan 上櫃 symbols need `"ex": "otc"` (e.g. 6488 環球晶) |
 | `twIndices` | TAIEX / SEMI / FINANCE / SHIPPING | which indices the footer flaps through on the Taiwan board — see [Picking your own Taiwan indices](#picking-your-own-taiwan-indices). `mis` route only |
+| `holdings` | `{ "tw": [], "us": [] }` | manual positions for the 損益 view, `{ code, qty, cost }` per holding; `.claude/stock-holdings.json` wins over this for whichever market it names — see [Holdings and the 損益 view](#holdings-and-the-損益-view) |
 
 Both built-in lists are 20 symbols, so `columns` resolves to 2 and each page
 holds 10 (a single-column page holds 5). Past that the watchlist pages, and
@@ -258,13 +267,18 @@ instead of leaving it on demo prices until the next tick.
   tick the same way a 20-symbol US list would. Yahoo's Taiwan quotes are about
   twenty minutes old (measured 2026-09-16: Yahoo said 10:29:05 while 證交所
   MIS said 10:48:36).
-- **Taiwan: `"twSource": "mis"` for the exchange's own real-time feed, one
-  request whatever the list length.** `mis.twse.com.tw` answers the whole
-  watchlist plus 加權指數 (`t00`) and 櫃買指數 (`o00`) in one call, with the
-  real last trade behind it, and has no 20-symbol batching cap of its own.
-  Two MIS fields need care: `z` reads `-` between trades, so the last actual
-  deal comes from `trade.z`, and 上櫃 symbols answer on the `otc_` channel
-  rather than `tse_`.
+- **Taiwan: `"twSource": "mis"`, a backup real-time route through the
+  exchange, one request whatever the list length.** `mis.twse.com.tw` answers
+  the whole watchlist plus 加權指數 (`t00`) and 櫃買指數 (`o00`) in one call,
+  with the real last trade behind it, and has no 20-symbol batching cap of
+  its own. Two MIS fields need care: `z` reads `-` between trades, so the
+  last actual deal comes from `trade.z`, and 上櫃 symbols answer on the
+  `otc_` channel rather than `tse_`.
+- **Taiwan: `"twSource": "shioaji"` for 永豐's own real-time ticks — the band
+  runs the fetcher, you never touch a terminal.** See
+  [永豐 Shioaji as that fetcher](#永豐-shioaji-as-that-fetcher); the built-in
+  HTTP feed (Yahoo, MIS) does not run for Taiwan on this route, only the
+  per-symbol Yahoo `chart` call the trend view already makes for K bars.
 - **K bars cost extra, so they are fetched only when the chart view wants
   them** — one request for the one symbol it is drawing. MIS carries no K
   bars at all, so the chart view always goes to Yahoo per symbol, whichever
@@ -421,7 +435,19 @@ so Latin names (`TAIEX`, `TPEx`) animate and Chinese ones do not.
 
 [`scripts/fetch-quotes-shioaji.py`](scripts/fetch-quotes-shioaji.py) is one
 ready to run. It reads the same `tw` watchlist out of your `stock-band.json`,
-logs in once, and rewrites the quotes file on a loop:
+logs in once, and rewrites the quotes file (and the holdings file, see
+[Holdings and the 損益 view](#holdings-and-the-損益-view)) on a loop.
+
+**Managed by the band (recommended):** set `"twSource": "shioaji"` and a
+`shioaji` block in `stock-band.json` (see [Configure](#configure)) —
+`hooks/register.tsx` spawns this exact script itself once Taiwan needs a
+feed, detached from the session, and keeps it fed with a heartbeat file
+(`.claude/stock-band.heartbeat`) so it exits on its own once nothing is
+watching anymore. A `.claude/stock-shioaji.pid` file keeps two Claude Code
+sessions on the same project from logging in twice. Nothing to run by hand;
+script output lands in `.claude/stock-shioaji.log`.
+
+**By hand**, same script, your own terminal:
 
 ```sh
 # needs a 永豐金 account with the API enabled and 簽署中心 passed, plus
@@ -436,7 +462,8 @@ call.** The `shioaji` command the package installs prints `Hello from shioaji!`
 and nothing else — the SDK is the whole interface, it is Python, and its login
 takes seconds and holds a session, so it cannot live inside a hooks module that
 fetches every 30 seconds. A long-lived script writing the override file is the
-shape that fits.
+shape that fits; `twSource: "shioaji"` is the band running that same shape
+itself instead of asking you to.
 
 What it buys you over the built-in 證交所 route: 永豐 quotes come with the
 broker's own 昨收 reference (so 漲跌 stays right through an ex-dividend date),
@@ -455,6 +482,39 @@ Two things measured while wiring it up (2026-09-16):
 The source inventory — which endpoints exist for each market, what each one
 costs and what was actually measured — is in
 [`docs/stock-api-notes.md`](docs/stock-api-notes.md).
+
+## Holdings and the 損益 view
+
+The 損益 button next to 趨勢圖 swaps the table for a P&L board: one row per
+holding (代號/名稱/股數/成本/現價/今日%/損益/損益%, 5 a page with `翻頁` if you
+hold more), and a totals row (market value, cost, total P&L, today's move).
+`回清單` goes back to the watchlist.
+
+Write `<project>/.claude/stock-holdings.json` in the shape of
+[`stock-holdings.example.json`](stock-holdings.example.json):
+
+```jsonc
+{ "asOf": 1757900000000, "market": "tw", "source": "永豐 庫存",
+  "holdings": [ { "code": "2330", "name": "台積電", "qty": 1000, "cost": 980.5, "price": 1188.0, "prevClose": 1165.0 } ] }
+```
+
+`qty` is shares (股), not 張. `cost` is the average cost per share.
+`price`/`prevClose` are optional — the band prefers a live quote for that
+code first (from the watchlist, or from the extra codes the feed fetches for
+exactly this reason) and only falls back to these when nothing priced that
+code. Unlike the quotes file, this one is never expired by age: a position
+does not go wrong just because nobody wrote a fresh copy in the last two
+minutes, but `asOf` still shows on the board's title row.
+
+No fetcher running? Add a `holdings` block to `stock-band.json` instead
+(see [Configure](#configure)) — the holdings file wins over it for whichever
+market it names.
+
+`scripts/fetch-quotes-shioaji.py` writes this file automatically every tick,
+from `api.list_positions()` — see
+[永豐 Shioaji as that fetcher](#永豐-shioaji-as-that-fetcher). Its quotes
+fetch also covers every held code, not just the watchlist, so a holding you
+are not watching still prices correctly.
 
 ## Develop
 

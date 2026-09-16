@@ -15,9 +15,9 @@ section.
 | What the user wants | Route |
 | --- | --- |
 | Just works, no setup | Yahoo — already the default for both markets |
-| Real intraday Taiwan prices, no key | 證交所 MIS — one config line |
+| Real intraday Taiwan prices, no key, no account | 證交所 MIS — one config line, a backup route |
+| Real-time Taiwan prices, has a 永豐/Sinopac account | Shioaji, `twSource: "shioaji"` — the band runs the fetcher itself |
 | Prices from their own broker or a paid vendor | The quotes-file override, fed by a script |
-| Specifically 永豐/Sinopac | Shioaji — a ready-made script for the override |
 | Specifically 富果/Fugle | Not built in — write a small fetcher into the override (§5 of the reference) |
 | Something else entirely (custom data, a simulator) | Write a fetcher into the override ("Write your own fetcher" in the reference) |
 
@@ -27,14 +27,30 @@ section.
 `"twSource": "yahoo"` in `<project>/.claude/stock-band.json`. Footer tag:
 `Yahoo 即時` (US) / `Yahoo 延遲` (Taiwan, ~20 min behind).
 
-**證交所 MIS (opt-in, real-time Taiwan).** In
+**證交所 MIS (backup, real-time Taiwan, no account).** In
 `<project>/.claude/stock-band.json`, set `"twSource": "mis"`. If the
 watchlist has 上櫃 symbols, each one needs `"ex": "otc"` or it returns
 nothing. Footer tag: `證交所 即時`.
 
-**永豐 Shioaji.** Get a 永豐金 account with the API enabled and 簽署中心
-passed, put `SINOBON_API_KEY`/`SINOBON_SECRET_KEY` in an env file outside the
-repo, then run:
+**永豐 Shioaji, managed by the band.** Set `"twSource": "shioaji"` in
+`<project>/.claude/stock-band.json`, put `SINOBON_API_KEY`/`SINOBON_SECRET_KEY`
+in an env file outside the repo, and point the `shioaji` block at it:
+
+```json
+"twSource": "shioaji",
+"shioaji": { "python": "python3", "env": "~/.sinobon.env", "interval": 10 }
+```
+
+The band spawns `scripts/fetch-quotes-shioaji.py` itself once Taiwan needs a
+feed, and keeps it fed with a heartbeat file — nothing to run by hand, nothing
+to leave a terminal open for. `python` can point at a project's own venv
+(e.g. `~/.venvs/shioaji/bin/python3`) if the system `python3` does
+not have `shioaji` installed. Footer tag: `永豐 即時`. The same script also
+writes `<project>/.claude/stock-holdings.json` every tick (from
+`list_positions`), which is what feeds the 損益 view.
+
+**永豐 Shioaji, run by hand.** Same script, started yourself instead of by the
+band — useful outside a Claude Code session, or to debug the feed:
 
 ```sh
 ~/.venvs/shioaji/bin/python3 \
@@ -43,7 +59,7 @@ repo, then run:
 ```
 
 Leave it running — it holds a login session and writes
-`<project>/.claude/stock-quotes.json` on a loop. Footer tag: `永豐 即時`.
+`<project>/.claude/stock-quotes.json` (and `stock-holdings.json`) on a loop.
 
 **富果 Fugle, or any other vendor.** Not wired into the module. Write a small
 script that calls the vendor's API and writes

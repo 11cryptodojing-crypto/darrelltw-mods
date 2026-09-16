@@ -1,23 +1,41 @@
 #!/usr/bin/env python3
 """
-永豐 Shioaji -> <project>/.claude/stock-quotes.json (the band's override seam).
+永豐 Shioaji -> <project>/.claude/stock-quotes.json and stock-holdings.json
+(the band's override seams).
 
 Why a script and not another branch of the feed: Shioaji is a Python SDK with
 a login that takes seconds and holds a session, so it cannot be called from
 the hooks module the way the exchange's and Yahoo's plain HTTP endpoints are.
-This logs in once, writes the quotes file on a loop, and the band picks it up
-- a fresh file wins over the built-in feed, and the footer says 永豐 即時.
+This logs in once, writes both files on a loop, and the band picks them up -
+a fresh quotes file wins over the built-in feed (footer says 永豐 即時), and the
+holdings file feeds the 損益 view (source label 永豐 庫存).
+
+Two ways to run it:
+  * by hand, same as before - stop it with Ctrl-C, the band falls back to its
+    own feed 120s later:
+
+      ~/.venvs/shioaji/bin/python3 \
+        mods/tw-stock-mod/scripts/fetch-quotes-shioaji.py \
+        --env ~/.sinobon.env --project . --interval 10
+
+  * spawned BY the band itself, when `stock-band.json` sets
+    `"twSource": "shioaji"` (hooks/register.tsx's spawnShioaji). That path
+    always passes `--heartbeat` and `--pidfile`:
+      - `--heartbeat FILE`: the band rewrites this file's mtime-equivalent
+        content on every tick it wants the Shioaji route. Once FILE is
+        missing or its timestamp is more than 90s old, this process exits by
+        itself - the band closed, or moved to the US board, and nothing is
+        watching anymore.
+      - `--pidfile FILE`: if FILE already holds another live process's pid,
+        this run exits at once (0) rather than double-fetching for the same
+        project; otherwise it writes its own pid there and removes it on the
+        way out. Two Claude Code sessions on the same project then share one
+        fetcher instead of racing two logins.
 
 What you need:
   * a 永豐金 account with the API enabled and 簽署中心 passed
   * SINOBON_API_KEY / SINOBON_SECRET_KEY in an env file (never in the repo)
   * shioaji installed on Python <= 3.13 (3.12 is what SinoPac tests against)
-
-  ~/.venvs/shioaji/bin/python3 \
-    mods/tw-stock-mod/scripts/fetch-quotes-shioaji.py \
-    --env ~/.sinobon.env --project . --interval 10
-
-Stop it with Ctrl-C. The band falls back to its own feed 120 seconds later.
 """
 import argparse
 import json
@@ -26,6 +44,8 @@ import signal
 import sys
 import time
 from pathlib import Path
+
+HEARTBEAT_MAX_AGE_MS = 90_000
 
 # 發行量加權股價指數 / 櫃買指數. Latin names because the board flaps one
 # character at a time and a Chinese character has no drum to riffle through.
@@ -149,6 +169,77 @@ def build_payload(api, watchlist: list[dict], contracts: dict, index_contracts: 
     return payload
 
 
+def build_holdings_payload(positions: list, contracts: dict, quotes: dict) -> dict | None:
+    """
+    `api.list_positions` -> the holdings file's shape (see
+    references/quote-sources.md's 損益 section and stock-holdings.example.json).
+    `price`/`prevClose` are filled here as a fallback only - the band prefers
+    whatever the quotes file already says for that code (item 4/6 of the
+    spec: the quotes fetch covers watchlist UNION positions precisely so
+    every holding has a live price there too).
+    """
+    holdings = []
+    for pos in positions:
+        code = str(field(pos, "code", "")).strip()
+        qty = float(field(pos, "quantity", 0) or 0)
+        if not code or qty == 0:
+            continue
+        direction = str(field(pos, "direction", "Buy"))
+        if "Sell" in direction:  # a short position - the qty sign carries it through the P&L math
+            qty = -qty
+        cost = float(field(pos, "price", 0) or 0)
+        contract = contracts.get(code)
+        name = getattr(contract, "name", None) or code
+        live = quotes.get(code)
+        last_price = float(field(pos, "last_price", 0) or 0)
+        price = live["price"] if live else (last_price or cost)
+        prev_close = live["prevClose"] if live else (float(getattr(contract, "reference", 0) or 0) or price)
+        holdings.append(
+            {"code": code, "name": name, "qty": qty, "cost": round(cost, 4), "price": round(price, 4), "prevClose": round(prev_close, 4)}
+        )
+    if not holdings:
+        return None
+    return {"asOf": int(time.time() * 1000), "market": "tw", "source": "永豐 庫存", "holdings": holdings}
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def claim_pidfile(pidfile: Path) -> bool:
+    """
+    True: this process owns the pidfile and should run. False: another live
+    process already owns it for this project, so the caller exits quietly
+    (0) rather than double-fetching - see the module docstring's `--pidfile`
+    section.
+    """
+    if pidfile.exists():
+        try:
+            existing = int(pidfile.read_text(encoding="utf-8").strip())
+        except (ValueError, OSError):
+            existing = None
+        if existing and existing != os.getpid() and pid_alive(existing):
+            return False
+    pidfile.parent.mkdir(parents=True, exist_ok=True)
+    pidfile.write_text(str(os.getpid()), encoding="utf-8")
+    return True
+
+
+def heartbeat_stale(path: Path) -> bool:
+    """Missing, unreadable, or older than HEARTBEAT_MAX_AGE_MS - all read as stale."""
+    if not path.exists():
+        return True
+    try:
+        ts = float(path.read_text(encoding="utf-8").strip())
+    except (ValueError, OSError):
+        return True
+    return (time.time() * 1000 - ts) > HEARTBEAT_MAX_AGE_MS
+
+
 def write_atomic(path: Path, payload: dict) -> None:
     """
     Write through a temp file and rename: the band polls this file every few
@@ -160,24 +251,38 @@ def write_atomic(path: Path, payload: dict) -> None:
     tmp.replace(path)
 
 
+def fetch_positions(api) -> list:
+    """`list_positions` in shares, not 張 - the band's Holding.qty contract wants shares."""
+    import shioaji as sj
+
+    return api.list_positions(api.stock_account, unit=sj.constant.Unit.Share) or []
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--project", default=os.getcwd(), help="the project whose .claude/ holds the band's files")
     parser.add_argument("--env", default="~/.sinobon.env", help="file holding SINOBON_API_KEY / SINOBON_SECRET_KEY")
     parser.add_argument("--interval", type=float, default=10, help="seconds between snapshots; 0 writes once and exits")
     parser.add_argument("--codes", default="", help="comma-separated codes, overriding the band's own watchlist")
+    parser.add_argument("--heartbeat", default="", help="path the band keeps rewriting while it wants this route; missing or >90s old exits this process (empty disables the check, for a by-hand run)")
+    parser.add_argument("--pidfile", default="", help="path holding this fetcher's pid; a live pid already there exits this run at once instead of double-fetching the same project")
     args = parser.parse_args()
 
     project = Path(args.project).expanduser().resolve()
     out_path = project / ".claude" / "stock-quotes.json"
+    holdings_path = project / ".claude" / "stock-holdings.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    pidfile = Path(args.pidfile).expanduser().resolve() if args.pidfile else None
+    if pidfile and not claim_pidfile(pidfile):
+        print(f"另一個 fetcher 已經在跑這個專案（{pidfile} 裡的 pid 還活著），這次略過", file=sys.stderr)
+        return
+    heartbeat_path = Path(args.heartbeat).expanduser().resolve() if args.heartbeat else None
 
     if args.codes:
         watchlist = [{"code": c.strip(), "name": c.strip()} for c in args.codes.split(",") if c.strip()]
     else:
         watchlist = read_watchlist(project / ".claude" / "stock-band.json")
-    if not watchlist:
-        sys.exit(f"ERROR: 找不到台股清單（{project}/.claude/stock-band.json 的 `tw`），或用 --codes 指定")
 
     load_env(Path(args.env).expanduser())
     for key in ("SINOBON_API_KEY", "SINOBON_SECRET_KEY"):
@@ -194,15 +299,48 @@ def main() -> None:
         subscribe_trade=False,  # quotes only: this script never places an order
     )
 
+    def stop(*_):
+        nonlocal running
+        running = False
+
+    running = True
+    try:
+        positions = fetch_positions(api)
+    except Exception as err:  # noqa: BLE001 - a failed first fetch just means no holdings this run
+        print(f"庫存查詢失敗: {type(err).__name__}: {err}", file=sys.stderr)
+        positions = []
+    position_codes = {str(field(p, "code", "")).strip() for p in positions}
+    position_codes.discard("")
+
+    if not watchlist and not position_codes:
+        sys.exit(
+            f"ERROR: 找不到台股清單（{project}/.claude/stock-band.json 的 `tw`）也沒有庫存部位，"
+            "或用 --codes 指定"
+        )
+
+    # The quotes fetch covers the watchlist UNION every held code (item 4/6 of
+    # the spec), so a holding that never made the watchlist still gets a live
+    # price in stock-quotes.json - build_holdings_payload prefers exactly that
+    # over the fallback price it computes itself.
+    watchlist_codes = {row["code"] for row in watchlist}
+    symbols = list(watchlist) + [{"code": c, "name": c} for c in position_codes if c not in watchlist_codes]
+
     # Shioaji resolves 上市/上櫃 itself, so unlike the exchange endpoint the
     # watchlist needs no `ex` field here.
-    contracts = {}
-    for row in watchlist:
-        contract = api.Contracts.Stocks[row["code"]]
+    contracts: dict = {}
+
+    def ensure_contract(code: str):
+        if code in contracts:
+            return contracts[code]
+        contract = api.Contracts.Stocks[code]
         if contract is None:
-            print(f"跳過 {row['code']}：永豐查不到這個代號", file=sys.stderr)
-            continue
-        contracts[row["code"]] = contract
+            print(f"跳過 {code}：永豐查不到這個代號", file=sys.stderr)
+            return None
+        contracts[code] = contract
+        return contract
+
+    for row in symbols:
+        ensure_contract(row["code"])
 
     index_contracts = []
     for exchange, code, name in INDICES:
@@ -210,19 +348,35 @@ def main() -> None:
         if contract is not None:
             index_contracts.append((name, contract))
 
-    running = True
-
-    def stop(*_):
-        nonlocal running
-        running = False
-
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
 
+    first_tick = True
     try:
         while running:
+            # Heartbeat check first, before doing any work this tick: a stale
+            # heartbeat means nobody is watching Taiwan anymore (band closed,
+            # or on the US board), and the very first tick is exempt because
+            # the caller (spawnShioaji) writes the heartbeat moments BEFORE
+            # spawning this process, not after.
+            if heartbeat_path and not first_tick and heartbeat_stale(heartbeat_path):
+                print(f"心跳逾時（{heartbeat_path} 沒人更新），結束", file=sys.stderr)
+                break
+            first_tick = False
+
             try:
-                payload = build_payload(api, watchlist, contracts, index_contracts)
+                positions = fetch_positions(api)
+            except Exception as err:  # noqa: BLE001 - keep the last good positions rather than crash
+                print(f"庫存查詢失敗（保留上一份）: {type(err).__name__}: {err}", file=sys.stderr)
+            for pos in positions:
+                code = str(field(pos, "code", "")).strip()
+                if code:
+                    ensure_contract(code)
+                    if code not in watchlist_codes and not any(s["code"] == code for s in symbols):
+                        symbols.append({"code": code, "name": code})
+
+            try:
+                payload = build_payload(api, symbols, contracts, index_contracts)
             except Exception as err:  # noqa: BLE001 - any SDK error is the same story here
                 print(f"快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
                 payload = None
@@ -234,6 +388,16 @@ def main() -> None:
             # a failed snapshot leaves the file alone: the band drops a file
             # older than 120 s by itself and says so, which beats a stale price
             # that still looks live
+
+            try:
+                holdings_payload = build_holdings_payload(positions, contracts, payload["quotes"] if payload else {})
+            except Exception as err:  # noqa: BLE001 - same story as the quotes snapshot
+                print(f"庫存快照失敗（保留上一份檔案）: {type(err).__name__}: {err}", file=sys.stderr)
+                holdings_payload = None
+            if holdings_payload:
+                write_atomic(holdings_path, holdings_payload)
+                print(f"{len(holdings_payload['holdings'])} 檔庫存 -> {holdings_path}", file=sys.stderr)
+
             if args.interval <= 0:
                 break
             slept = 0.0
@@ -245,6 +409,11 @@ def main() -> None:
             api.logout()
         except Exception:  # noqa: BLE001 - logout failing on the way out changes nothing
             pass
+        if pidfile:
+            try:
+                pidfile.unlink(missing_ok=True)
+            except OSError:
+                pass
         print("永豐 已登出", file=sys.stderr)
 
 

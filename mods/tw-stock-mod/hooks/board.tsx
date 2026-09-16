@@ -15,7 +15,7 @@ type TextTag = ClientElements['Text']
 
 export type MarketId = 'tw' | 'us'
 export type Phase = 'open' | 'closed'
-export type View = 'table' | 'chart'
+export type View = 'table' | 'chart' | 'pnl'
 
 /** [open, high, low, close] */
 export type Bar = [number, number, number, number]
@@ -35,6 +35,9 @@ export type QuoteRow = {
    */
   was?: { price: number; change: number; pct: number; code?: string; name?: string }
 }
+
+/** a holding, already priced by register.tsx - the 損益 view only formats these */
+export type Holding = { code: string; name: string; qty: number; cost: number; price: number; prevClose: number }
 
 export type BoardProps = {
   market: MarketId
@@ -90,6 +93,20 @@ export type BoardProps = {
   animation: 'full' | 'off'
   countdown: boolean
   now: number
+  /**
+   * `view: "pnl"` only - already priced and merged by register.tsx (live
+   * quote first, the holdings file's own price/prevClose otherwise; see
+   * pricedHoldings). board.tsx never looks anything up itself, it only
+   * formats what arrives here and pages through it 5 at a time.
+   */
+  holdings: Holding[]
+  /** what the pnl view's title calls the source, e.g. "永豐 庫存" */
+  holdingsSource: string
+  /** epoch ms the holdings snapshot was taken; 0 when there is none */
+  holdingsAt: number
+  /** which page of the holdings the pnl view is showing, and how many there are */
+  holdingsPage: number
+  holdingsPageCount: number
 }
 
 // `turn` is the change the rows last turned for, and `since` is when that turn
@@ -457,6 +474,8 @@ const pickers = new WeakMap<object, Picker>()
 // being charted, not the market, so it stays inside the board.
 const TABLE_ROWS = 8 // header, rule, 5 quote rows, footer
 const CHART_ROWS = 8 // title, 5 candle rows, axis, footer - the same height
+const PNL_ROWS = 8 // title, header, 5 holding rows, totals - the same height
+const PNL_PAGE_SIZE = 5
 // as the table, so opening a chart no longer pushes the transcript up a line
 const TABLE_QUOTE_ROWS = 5 // rows in the quote area, in single- or two-column mode
 const MAX_TABLE_QUOTES = TABLE_QUOTE_ROWS * 2 // two-column mode holds 2 symbols a row
@@ -638,6 +657,68 @@ function layout2(width: number): [HalfLayout, HalfLayout] {
 /** whether a terminal this wide can lay out two readable halves - see MIN_TWO_COL_WIDTH */
 function fitsTwoColumns(width: number): boolean {
   return Math.min(width - 1, TWO_COL_MAX) >= MIN_TWO_COL_WIDTH
+}
+
+// --- pnl (損益) layout -------------------------------------------------------
+// One column of right-anchored numeric fields, wider than the watchlist
+// table's (six numbers instead of two): 股數/成本/現價/今日%/損益/損益%. The
+// same right-to-left reservation style as `layout` above, capped so the
+// table does not stretch across a very wide terminal.
+type PnlLayout = {
+  symCol: number
+  nameCol: number
+  qtyRight: number
+  costRight: number
+  priceRight: number
+  todayRight: number
+  pnlRight: number
+  pnlPctRight: number
+  showName: boolean
+}
+
+// Field-width budget, right to left (each gap is the field's own width + one
+// column of air before the next field starts): pnlPct 8 ("+100.00%"), pnl 12
+// ("+9,999,999" plus room), today% 8, price 9 ("99,999.00" - 成本/現價 always
+// carry 2 decimals now, see priceDecimals in the pnl branch), cost 9, qty 8
+// ("999,999"), name 12 (up to ~6 CJK characters), sym 6 - this adds up to
+// exactly 79 columns, which is why `nameCol` and every `*Right` below line up
+// with an 80-column band with nothing left over. A name here used to collide
+// with the qty column at 80 columns (元大台灣50 10,000 -> "元大台灣5010,000")
+// because the old budget gave name+qty only 14 columns combined; this one
+// gives them 12+1+8 = 21.
+function pnlLayout(width: number): PnlLayout {
+  const w = Math.max(60, width)
+  const pnlPctRight = Math.min(w - 1, 90)
+  const pnlRight = pnlPctRight - 9
+  const todayRight = pnlRight - 13
+  const priceRight = todayRight - 9
+  const costRight = priceRight - 10
+  const qtyRight = costRight - 10
+  const nameCol = 8
+  return {
+    symCol: 1,
+    nameCol,
+    qtyRight,
+    costRight,
+    priceRight,
+    todayRight,
+    pnlRight,
+    pnlPctRight,
+    showName: qtyRight - nameCol >= 13,
+  }
+}
+
+function hhmmLocal(ms: number): string {
+  if (!ms) return '--:--'
+  const d = new Date(ms)
+  const two = (n: number) => String(n).padStart(2, '0')
+  return `${two(d.getHours())}:${two(d.getMinutes())}`
+}
+
+/** `+11.11%` / `-11.11%` / `0.00%` */
+function pct(value: number): string {
+  const sign = value > 0 ? '+' : value < 0 ? '-' : ''
+  return `${sign}${Math.abs(value).toFixed(2)}%`
 }
 
 // --- candle panel ----------------------------------------------------------
@@ -887,7 +968,10 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
 
   const lay = layout(surface.columns || 80)
   const open = props.phase === 'open'
-  const rows = Array.from({ length: props.view === 'chart' ? CHART_ROWS : TABLE_ROWS }, () => new Row())
+  const rows = Array.from(
+    { length: props.view === 'chart' ? CHART_ROWS : props.view === 'pnl' ? PNL_ROWS : TABLE_ROWS },
+    () => new Row(),
+  )
   const quotes = props.quotes.slice(0, MAX_TABLE_QUOTES)
   // the feed names itself - 證交所 即時 and Yahoo 即時 are not the same claim -
   // and only a source that did not say falls back to a generic label
@@ -963,6 +1047,96 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     // the table is not on screen here, so there is nothing under the pointer
     // to pick; the named buttons above the band move between symbols instead
     picker.hit = () => undefined
+  } else if (props.view === 'pnl') {
+    // No click targets yet (item 8 of the spec) - the pnl view's own paging
+    // button lives in the button row register.tsx draws above this Client.
+    picker.hit = () => undefined
+
+    const lay = pnlLayout(surface.columns || 80)
+    // 成本/現價 reuse the table's own price formatter - `thousands()` with no
+    // decimals argument, i.e. always 2, the same call the watchlist table's
+    // price column makes regardless of market (e.g. 2,436.04). `decimals`
+    // stays market-dependent for money that is NOT a price - 損益 and the
+    // totals row read as integer TWD, the same way the rest of the band's
+    // TWD figures do (US keeps cents throughout).
+    const priceDecimals = 2
+    const decimals = props.market === 'us' ? 2 : 0
+    const holdings = props.holdings
+    const page = holdings.slice(props.holdingsPage * PNL_PAGE_SIZE, props.holdingsPage * PNL_PAGE_SIZE + PNL_PAGE_SIZE)
+
+    // row 0: title - what this is, where the numbers came from, how many
+    // positions, and when the snapshot was taken. A demo price anywhere on
+    // the band means these are demo prices too, so the title says so instead
+    // of reading as a real portfolio.
+    const title = rows[0]
+    const demoTag = props.source === 'demo' ? ' · 示範價格' : ''
+    title.put(
+      lay.symCol,
+      `庫存損益 · ${props.holdingsSource || '沒有庫存資料'} · ${holdings.length} 檔 · 更新 ${hhmmLocal(props.holdingsAt)}${demoTag}`,
+      DIM,
+    )
+
+    // row 1: column headers, right-anchored the same way the watchlist
+    // table's are.
+    const head = rows[1]
+    head.put(lay.symCol, '代號', HEAD)
+    head.put(lay.nameCol, '名稱', HEAD)
+    head.putRight(lay.qtyRight, '股數', HEAD)
+    head.putRight(lay.costRight, '成本', HEAD)
+    head.putRight(lay.priceRight, '現價', HEAD)
+    head.putRight(lay.todayRight, '今日%', HEAD)
+    head.putRight(lay.pnlRight, '損益', HEAD)
+    head.putRight(lay.pnlPctRight, '損益%', HEAD)
+
+    if (holdings.length === 0) {
+      rows[2].put(
+        lay.symCol,
+        '沒有庫存資料：寫 .claude/stock-holdings.json，或在 stock-band.json 加 holdings（見 README）',
+        DIM,
+      )
+    } else {
+      // rows 2..6: one holding a row, 5 per page - fewer than 5 on the last
+      // page just leaves the remaining rows blank (filled with a
+      // non-breaking space below, same as every other view).
+      for (let i = 0; i < page.length; i++) {
+        const h = page[i]
+        const r = rows[2 + i]
+        const pnlAbs = (h.price - h.cost) * h.qty
+        const pnlPct = h.cost ? (h.price / h.cost - 1) * 100 : 0
+        const todayPct = h.prevClose ? (h.price / h.prevClose - 1) * 100 : 0
+        r.put(lay.symCol, h.code, SYMBOL)
+        if (lay.showName) r.put(lay.nameCol, h.name, WHITE)
+        r.putRight(lay.qtyRight, thousands(h.qty, 0), WHITE)
+        r.putRight(lay.costRight, thousands(h.cost, priceDecimals), DIM)
+        r.putRight(lay.priceRight, thousands(h.price, priceDecimals), WHITE)
+        r.putRight(lay.todayRight, pct(todayPct), tone(props.market, todayPct))
+        r.putRight(lay.pnlRight, signed(pnlAbs, decimals), tone(props.market, pnlAbs))
+        r.putRight(lay.pnlPctRight, pct(pnlPct), tone(props.market, pnlPct))
+      }
+    }
+
+    // row 7: portfolio totals, over every holding (not just this page) -
+    // the one number on this board that has to add up whichever page you
+    // are looking at.
+    const foot = rows[7]
+    const value = holdings.reduce((sum, h) => sum + h.price * h.qty, 0)
+    const cost = holdings.reduce((sum, h) => sum + h.cost * h.qty, 0)
+    const pnlTotal = value - cost
+    const pnlTotalPct = cost ? (pnlTotal / cost) * 100 : 0
+    const todayTotal = holdings.reduce((sum, h) => sum + (h.price - h.prevClose) * h.qty, 0)
+    let col = lay.symCol
+    const put = (text: string, fg?: string) => {
+      foot.put(col, text, fg)
+      col = foot.width()
+    }
+    put('市值 ', DIM)
+    put(thousands(value, decimals), WHITE)
+    put('  成本 ', DIM)
+    put(thousands(cost, decimals), WHITE)
+    put('  損益 ', DIM)
+    put(`${signed(pnlTotal, decimals)} (${pct(pnlTotalPct)})`, tone(props.market, pnlTotal))
+    put('  今日 ', DIM)
+    put(signed(todayTotal, decimals), tone(props.market, todayTotal))
   } else {
     // row 0: column headers. row 1: rule. The market name, session state,
     // hours and market clock used to open this view as its own title row;

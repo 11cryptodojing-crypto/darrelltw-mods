@@ -1,0 +1,13 @@
+{
+  "_comment": "The 損益 view's data seam. Whatever fetches positions writes <project>/.claude/stock-holdings.json in this shape - scripts/fetch-quotes-shioaji.py does it every tick, after list_positions. The band never treats this file as stale (a position does not go wrong just because nobody refreshed it in the last two minutes), but `asOf` still shows on the pnl board's title row.",
+  "_comment_price": "`price`/`prevClose` are optional. The band prefers a live quote for that code - from the watchlist, or from the extra codes the feed fetches for exactly this reason (see references/quote-sources.md's 損益 section) - and only falls back to these when the feed never priced that code at all.",
+  "_comment_manual": "No fetcher running? Skip this file and add a `holdings` block to stock-band.json instead: { \"holdings\": { \"tw\": [ {\"code\":\"2330\",\"qty\":1000,\"cost\":980.5} ], \"us\": [] } }. This file wins over that block for whichever market it names.",
+  "asOf": 1757900000000,
+  "market": "tw",
+  "source": "永豐 庫存",
+  "holdings": [
+    { "code": "2330", "name": "台積電", "qty": 1000, "cost": 980.5, "price": 1188.0, "prevClose": 1165.0 },
+    { "code": "2317", "name": "鴻海", "qty": 3000, "cost": 190.0, "price": 215.5, "prevClose": 214.5 },
+    { "code": "0050", "name": "元大台灣50", "qty": 5000, "cost": 210.0, "price": 231.0, "prevClose": 228.85 }
+  ]
+}

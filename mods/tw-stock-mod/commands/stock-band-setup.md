@@ -30,7 +30,9 @@ description: 引導使用者設定 tw-stock-mod 的台股／美股觀察清單
 
 ### 3a. 台股：打證交所 MIS
 
-band 的台股報價預設走證交所（`twSource: "mis"`），所以要用同一支端點驗證。
+band 的台股報價預設走 Yahoo（`twSource: "yahoo"`，見 3b），但驗證代號還是用證交所
+MIS 這支端點——它是即時的，能馬上看出代號打對了沒，設定 `twSource: "mis"`（備用即時路線）
+或 `twSource: "shioaji"`（永豐即時，見 README）時也是走同一批代號。
 每個代號**同時查上市和上櫃兩個頻道**，因為代號本身看不出是哪一種：
 
 ```

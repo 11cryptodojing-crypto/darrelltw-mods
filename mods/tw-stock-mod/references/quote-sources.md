@@ -17,9 +17,9 @@ route filled in a number.
 | Route | Key / account | Process to keep running | Freshness | Intraday series (`spark` column) | K bars | 昨收 (previous close) | 上市/上櫃 resolution | Footer tag |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | **Yahoo** (default) | none | none | US: real-time. Taiwan: ~20 min behind | Yes, native | Yes, native | Yes | Config's own `"ex": "otc"` | `Yahoo 即時` (US) / `Yahoo 延遲` (Taiwan) |
-| **證交所 MIS** | none | none | Real intraday (~5 s snapshot) | No — borrows one Yahoo call for this column only | No — same borrow, per-symbol | Yes (`y` field) | Config's own `"ex": "otc"`, on the `otc_` channel | `證交所 即時` |
+| **證交所 MIS** (backup, real-time, no account) | none | none | Real intraday (~5 s snapshot) | No — borrows one Yahoo call for this column only | No — same borrow, per-symbol | Yes (`y` field) | Config's own `"ex": "otc"`, on the `otc_` channel | `證交所 即時` |
 | **Quotes-file override** | depends on what writes it | depends on what writes it | Whatever the writer promises | Only if the writer fills `series` | Only if the writer fills `bars` | Only if the writer fills `prevClose` | Handled by the writer, before the file is written | `source` string in the file, or `報價檔` if it leaves that blank |
-| **永豐 Shioaji** | 永豐金 brokerage account + API access | Yes — a long-lived login | Real intraday tick | No — the script does not fill it (unverified whether Shioaji itself carries one) | No — same | Yes (`contract.reference`) | Automatic — the SDK resolves it | `永豐 即時` |
+| **永豐 Shioaji**, `twSource: "shioaji"` | 永豐金 brokerage account + API access | No — the band spawns and re-spawns it itself | Real intraday tick | No — the script does not fill it (unverified whether Shioaji itself carries one) | No — same | Yes (`contract.reference`) | Automatic — the SDK resolves it | `永豐 即時` |
 | **Fugle 富果** (not wired) | Free Fugle membership | Whatever you write | Real intraday | Not from the one REST endpoint checked | Not from the one REST endpoint checked | Yes (`previousClose`) | Automatic — the symbol alone is enough | Whatever `source` your fetcher writes |
 
 ## 1. Yahoo (default)
@@ -57,10 +57,11 @@ official rate limit is published; the community number is roughly 360
 requests/hour, and the band's own budget of 300/hour (see §6) sits under it on
 purpose.
 
-## 2. 證交所 MIS (opt-in, `"twSource": "mis"`)
+## 2. 證交所 MIS (backup route, `"twSource": "mis"`)
 
 No key, no account, nothing to run — same shape as Yahoo, but Taiwan-only and
-truly real-time.
+truly real-time. Yahoo stays the default (§1); reach for this when Yahoo's
+~20-minute Taiwan lag matters and a 永豐 account (§4) is not an option.
 
 **How to turn it on.** One line in `<project>/.claude/stock-band.json`:
 
@@ -164,7 +165,39 @@ interface. The SDK's Python API is the whole interface, so a script that logs
 in once and stays running is the shape that fits, writing the override file
 from §3 on a loop.
 
-**Turn it on:**
+**Turn it on, managed by the band.** Set `"twSource": "shioaji"` in
+`<project>/.claude/stock-band.json` and point the `shioaji` block at your env
+file:
+
+```jsonc
+{
+  "twSource": "shioaji",
+  "shioaji": { "python": "python3", "env": "~/.sinobon.env", "interval": 10 }
+}
+```
+
+Once Taiwan needs a feed, `hooks/register.tsx`'s `spawnShioaji` runs this
+same script itself, detached (`$.process.run(['/bin/sh', '-c', 'nohup ... &'],
+...)` — the `nohup`/`&` wrapper is what lets a one-shot `run()` call return
+while the script keeps going past it; see the function's own comment for why).
+The band and the script then talk over two files instead of a socket:
+
+- **The heartbeat** (`.claude/stock-band.heartbeat`) — the band rewrites it
+  every feed tick it wants Taiwan prices; the script exits by itself once
+  that file is missing or more than 90 seconds old, so a closed band or a
+  switch to the US board does not leave a login running forever.
+- **The pidfile** (`.claude/stock-shioaji.pid`) — a second Claude Code
+  session on the same project sees a live pid there and exits at once
+  instead of logging in twice for the same watchlist.
+
+Respawn is rate-limited on the band's side too: once at session start, then
+only when the quotes file has gone stale (>120s) AND the last spawn attempt
+was more than 60 seconds ago — never more than once a minute. A missing
+`python` or env file logs a warning (`$.ui.log`) and falls back to Yahoo for
+that tick; it does not break the band. Script output goes to
+`.claude/stock-shioaji.log`, not to the band's own debug log.
+
+**Turn it on by hand**, the same script, started yourself:
 
 ```sh
 ~/.venvs/shioaji/bin/python3 \
@@ -174,7 +207,9 @@ from §3 on a loop.
 
 It reads the same `tw` watchlist out of `<project>/.claude/stock-band.json`,
 so there is nothing else to configure. Stop it with Ctrl-C; the band falls
-back to its own feed 120 seconds after the file goes stale.
+back to its own feed 120 seconds after the file goes stale. `--heartbeat` and
+`--pidfile` are optional here — they only matter when the band itself is the
+one spawning the process.
 
 **What it carries.** `api.snapshots()` gives current price, and
 `contract.reference` gives 昨收 in the broker's own terms — this stays correct
@@ -192,6 +227,12 @@ prints `更新 18:55` for a 10:55 snapshot.
 
 **How to tell it took.** The footer reads `永豐 即時` (the script sets
 `"source": "永豐 即時"` in the file it writes).
+
+**Holdings.** The script also calls `api.list_positions()` every tick and
+writes `<project>/.claude/stock-holdings.json` — see §6. Its quotes fetch
+covers the watchlist UNION every held code, so a holding that never made the
+watchlist still gets a live price there too, which the 損益 view prefers over
+the holdings file's own `price`/`prevClose`.
 
 ## 5. Fugle 富果 and other keyed vendors (not wired)
 
@@ -222,6 +263,39 @@ that fetcher yet. What it has to do:
 Fugle resolves 上市/上櫃 by symbol alone — its data source already spans both
 the exchange and 櫃買中心, so a fetcher does not need an `"ex"` hint the way
 MIS does.
+
+## 6. The holdings file and the 損益 view
+
+`<project>/.claude/stock-holdings.json` is what the 損益 button reads —
+positions, not watchlist prices. `scripts/fetch-quotes-shioaji.py` writes it
+every tick after `list_positions` (§4), and anything else can write it by
+hand or from its own fetcher, in the shape of
+[`../../stock-holdings.example.json`](../../stock-holdings.example.json):
+
+```jsonc
+{ "asOf": 1757900000000, "market": "tw", "source": "永豐 庫存",
+  "holdings": [ { "code": "2330", "name": "台積電", "qty": 1000, "cost": 980.5, "price": 1188.0, "prevClose": 1165.0 } ] }
+```
+
+`qty` is shares (股), not 張. `cost` is the average cost per share.
+`price`/`prevClose` are optional — the band prefers a live quote for that
+code first (see the UNION note in §4) and only falls back to these when
+nothing priced that code.
+
+**No staleness rule.** Unlike the quotes file, this one is never expired by
+age: a position does not go wrong just because nobody wrote a fresh copy in
+the last two minutes. `asOf` still shows on the pnl board's title row.
+
+**Manual alternative**, no file at all: a `holdings` block in
+`stock-band.json` —
+
+```jsonc
+{ "holdings": { "tw": [ { "code": "2330", "qty": 1000, "cost": 980.5 } ], "us": [] } }
+```
+
+The holdings file wins over this block for whichever market it names (its
+own `market` field, or every market if it leaves that out); a market the
+file does not cover falls back to the config block.
 
 ## Write your own fetcher
 

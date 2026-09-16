@@ -6,7 +6,12 @@
   "highlight": true,
   "trend": "none",
   "feed": "auto",
-  "twSource": "mis",
+  "_twSource_comment": "Where Taiwan prices come from. \"yahoo\" (default) needs no setup, ~20 min behind. \"mis\" is 證交所's own real-time snapshot - a backup route, no account needed. \"shioaji\" is 永豐's real-time feed; the band spawns scripts/fetch-quotes-shioaji.py itself (see the `shioaji` block below and references/quote-sources.md).",
+  "twSource": "yahoo",
+  "_shioaji_comment": "twSource: \"shioaji\" only. `env` holds SINOBON_API_KEY/SINOBON_SECRET_KEY (never commit it); `~` expands to $HOME.",
+  "shioaji": { "python": "python3", "env": "~/.sinobon.env", "interval": 10 },
+  "_holdings_comment": "The 損益 view's manual alternative to stock-holdings.json (which wins for whichever market it names). qty is shares, not 張; cost is the average cost per share.",
+  "holdings": { "tw": [], "us": [] },
   "_twIndices_comment": "Taiwan footer indices, MIS route only. First entry is the headline index; names must be Latin (the split-flap board cannot turn a Chinese character). 146 channels exist - see the README.",
   "twIndices": [
     {

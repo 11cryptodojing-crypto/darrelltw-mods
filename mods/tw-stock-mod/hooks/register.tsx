@@ -24,6 +24,7 @@ import type { Register } from 'claude-code'
 
 const CONFIG_PATH = '.claude/stock-band.json'
 const QUOTES_PATH = '.claude/stock-quotes.json'
+const HOLDINGS_PATH = '.claude/stock-holdings.json'
 const DEFAULT_REFRESH_MS = 3000
 const QUOTE_STALE_MS = 120_000
 const SNOOZE_MS = 30 * 60 * 1000
@@ -106,7 +107,7 @@ type TwIndex = { code: string; name: string; ex: TwExchange }
 type MarketId = 'tw' | 'us'
 type Phase = 'open' | 'closed'
 type MarketMode = 'auto' | MarketId
-type View = 'table' | 'chart'
+type View = 'table' | 'chart' | 'pnl'
 /** how many symbols the table draws per row; "auto" picks off the page size, see effectiveColumns() */
 type ColumnMode = 'auto' | 1 | 2
 
@@ -416,6 +417,14 @@ function quoteRow(sym: Ticker, price: number, prevClose: number, bars?: Bar[], w
 // --- optional config / quotes files ----------------------------------------
 type FileQuote = { price: number; prevClose?: number; name?: string; bars?: Bar[] }
 
+// A holding as the holdings file or `stock-band.json`'s `holdings` block
+// states it - `price`/`prevClose` are optional because the live feed usually
+// covers them; `pricedHolding` below fills in whatever this leaves out.
+type Holding = { code: string; name: string; qty: number; cost: number; price?: number; prevClose?: number }
+// A holding once register.tsx has resolved a price for it - board.tsx (the
+// 損益 view) only formats these, it never falls back to anything itself.
+type PricedHolding = { code: string; name: string; qty: number; cost: number; price: number; prevClose: number }
+
 type Config = {
   market: MarketMode
   refreshMs: number
@@ -436,8 +445,16 @@ type Config = {
    * prices.
    */
   feed: 'auto' | 'us' | 'tw' | 'both' | 'off'
-  /** where Taiwan prices come from: the exchange itself, or Yahoo ~20 minutes behind */
-  twSource: 'mis' | 'yahoo'
+  /**
+   * where Taiwan prices come from. `yahoo` (default) is one batched request,
+   * ~20 minutes behind. `mis` is 證交所's own real-time snapshot, a backup
+   * route for whoever wants exchange-true intraday without a broker account.
+   * `shioaji` hands Taiwan to 永豐's real-time feed instead: the band spawns
+   * `scripts/fetch-quotes-shioaji.py` itself (see spawnShioaji below) and
+   * reads back the quotes file it writes, rather than calling an HTTP
+   * endpoint the way the other two routes do.
+   */
+  twSource: 'mis' | 'yahoo' | 'shioaji'
   /** seconds between feed requests, in ms; clamped to FEED_MS_MIN and up */
   feedMs: number
   /** how long one page of the watchlist holds before the board turns; 0 = manual only */
@@ -453,6 +470,23 @@ type Config = {
   /** show how many seconds until the next feed request */
   countdown: boolean
   lists: Record<MarketId, Ticker[]>
+  /** `twSource: "shioaji"` only - how the band runs the fetcher script itself */
+  shioaji: ShioajiConfig
+  /**
+   * manual holdings, keyed by market - the alternative to
+   * `.claude/stock-holdings.json` (which wins for whichever market it names).
+   * See parseHoldings and the README's 損益 section.
+   */
+  holdings: Record<MarketId, Holding[]>
+}
+
+type ShioajiConfig = {
+  /** interpreter to run the script with, e.g. the project's own venv python */
+  python: string
+  /** env file holding SINOBON_API_KEY / SINOBON_SECRET_KEY; `~` expands to $HOME */
+  env: string
+  /** seconds between snapshots the script writes */
+  interval: number
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -513,6 +547,8 @@ function defaultConfig(): Config {
     animation: 'full',
     countdown: true,
     lists: { tw: TW_LIST, us: US_LIST },
+    shioaji: { python: 'python3', env: '~/.sinobon.env', interval: 10 },
+    holdings: { tw: [], us: [] },
   }
 }
 
@@ -585,7 +621,17 @@ function parseConfig(text: string | undefined): Config {
   const feed = root.feed
   if (feed === 'off' || feed === false) cfg.feed = 'off'
   else if (feed === 'auto' || feed === 'us' || feed === 'tw' || feed === 'both') cfg.feed = feed
-  if (root.twSource === 'mis' || root.twSource === 'yahoo') cfg.twSource = root.twSource
+  if (root.twSource === 'mis' || root.twSource === 'yahoo' || root.twSource === 'shioaji') {
+    cfg.twSource = root.twSource
+  }
+  const shioaji = asRecord(root.shioaji)
+  if (shioaji) {
+    cfg.shioaji = {
+      python: str(shioaji.python, cfg.shioaji.python),
+      env: str(shioaji.env, cfg.shioaji.env),
+      interval: Math.max(0, num(shioaji.interval, cfg.shioaji.interval)),
+    }
+  }
   cfg.feedMs = Math.max(FEED_MS_MIN, num(root.feedMs, cfg.feedMs))
   // 0 turns auto-paging off and leaves the `p` button as the only way to page
   const pageMs = num(root.pageMs, cfg.pageMs)
@@ -594,7 +640,40 @@ function parseConfig(text: string | undefined): Config {
   if (root.countdown === false) cfg.countdown = false
   cfg.lists = { tw: parseList(root.tw, TW_LIST), us: parseList(root.us, US_LIST) }
   cfg.twIndices = parseTwIndices(root.twIndices)
+  const holdings = asRecord(root.holdings)
+  cfg.holdings = {
+    tw: parseHoldingsList(holdings?.tw),
+    us: parseHoldingsList(holdings?.us),
+  }
   return cfg
+}
+
+/**
+ * The manual alternative to `.claude/stock-holdings.json`: a `holdings` block
+ * in `stock-band.json`, `{ tw: [...], us: [...] }`. `code` and `qty` are the
+ * only fields that matter for the P&L math; `name` falls back to the code and
+ * a bad or missing `qty`/`cost` reads as 0 rather than dropping the row, so a
+ * typo shows up as an obviously wrong number instead of a silently missing
+ * holding.
+ */
+function parseHoldingsList(value: unknown): Holding[] {
+  if (!Array.isArray(value)) return []
+  const out: Holding[] = []
+  for (const raw of value) {
+    const entry = asRecord(raw)
+    if (!entry) continue
+    const code = str(entry.code, '')
+    if (!code) continue
+    out.push({
+      code,
+      name: str(entry.name, code),
+      qty: num(entry.qty, 0),
+      cost: num(entry.cost, 0),
+      price: typeof entry.price === 'number' ? entry.price : undefined,
+      prevClose: typeof entry.prevClose === 'number' ? entry.prevClose : undefined,
+    })
+  }
+  return out
 }
 
 /**
@@ -730,6 +809,98 @@ function parseQuotes(text: string | undefined, now: number): QuotesFile | undefi
     sourceLabel: typeof root.source === 'string' ? root.source : undefined,
     barLabel: typeof root.barLabel === 'string' ? root.barLabel : undefined,
   }
+}
+
+// --- holdings file (.claude/stock-holdings.json) ----------------------------
+type HoldingsFile = {
+  asOf: number
+  market?: MarketId
+  source?: string
+  holdings: Holding[]
+}
+
+/**
+ * `.claude/stock-holdings.json` - positions the 損益 view prices, written by
+ * the Shioaji fetcher every tick (after `list_positions`) or by hand. Unlike
+ * the quotes file this is never treated as stale: a position does not go
+ * wrong just because nobody wrote a fresh copy in the last two minutes, so
+ * QUOTE_STALE_MS does not apply here. `asOf` still travels through, so the
+ * board can print when the snapshot was taken.
+ */
+function parseHoldingsFile(text: string | undefined): HoldingsFile | undefined {
+  if (!text) return undefined
+  let root: Record<string, unknown> | undefined
+  try {
+    root = asRecord(JSON.parse(text) as unknown)
+  } catch {
+    return undefined
+  }
+  if (!root) return undefined
+  const holdingsRaw = root.holdings
+  const holdings = parseHoldingsList(holdingsRaw)
+  if (holdings.length === 0) return undefined
+  const market = root.market === 'tw' || root.market === 'us' ? root.market : undefined
+  return {
+    asOf: num(root.asOf, 0),
+    market,
+    source: typeof root.source === 'string' ? root.source : undefined,
+    holdings,
+  }
+}
+
+/**
+ * The holdings file wins over `stock-band.json`'s `holdings` block for
+ * whichever market it names (or for both, if it leaves `market` out); a
+ * market the file does not cover falls back to the config block. Returns the
+ * raw (unpriced) holdings plus what the footer should call the source and
+ * when the snapshot was taken - `pricedHoldings` below fills in the price.
+ */
+function holdingsFor(
+  market: MarketId,
+  file: HoldingsFile | undefined,
+  cfg: Config,
+): { holdings: Holding[]; source: string; asOf: number } {
+  if (file && (!file.market || file.market === market)) {
+    return { holdings: file.holdings, source: file.source ?? '庫存檔', asOf: file.asOf }
+  }
+  const manual = cfg.holdings[market]
+  return { holdings: manual, source: manual.length > 0 ? '手動設定' : '', asOf: 0 }
+}
+
+/**
+ * Every holding's price, live quote first: a symbol the feed or the quotes
+ * file is already carrying (because it is on the watchlist, or because the
+ * feed also fetched it for this reason - see feedUs/feedTw) prices the
+ * holding at the same number the table would show. A holding the feed never
+ * touched falls back to whatever the holdings file itself carried
+ * (`price`/`prevClose`), and a holding with neither reads as its own cost so
+ * the P&L math never divides by zero or shows NaN.
+ */
+/**
+ * Holdings the feed also has to fetch a price for, because they are not on
+ * the watchlist. The feed's symbol set for a market is the watchlist UNION
+ * these - see feedUs/feedTw - so every holding has a live price in the
+ * quotes file, and buildProps still draws only the watchlist in the table
+ * (item 6/7 of the spec): a holding-only code is priced but never shown
+ * there. `ex` is left out (Taiwan holdings default to 上市 the same way
+ * parseList's own default does); a 上櫃-only holding needs its own
+ * watchlist entry with `"ex": "otc"` to price through MIS correctly.
+ */
+function holdingExtras(market: MarketId, list: Ticker[], cfg: Config): Ticker[] {
+  const { holdings } = holdingsFor(market, lastHoldingsFile, cfg)
+  const have = new Set(list.map(t => t.code))
+  return holdings
+    .filter(h => !have.has(h.code))
+    .map(h => ({ code: h.code, name: h.name, prevClose: h.prevClose ?? h.cost ?? 100, amp: 0.8, phase: 0, period: 57, drift: 0 }))
+}
+
+function pricedHoldings(holdings: Holding[], quotesFile: QuotesFile | undefined): PricedHolding[] {
+  return holdings.map(h => {
+    const live = quotesFile?.quotes[h.code]
+    const price = live?.price ?? h.price ?? h.cost
+    const prevClose = live?.prevClose ?? h.prevClose ?? price
+    return { code: h.code, name: live?.name ?? h.name, qty: h.qty, cost: h.cost, price, prevClose }
+  })
 }
 
 // --- live feed: Yahoo ------------------------------------------------------
@@ -926,10 +1097,18 @@ type BoardProps = {
   animation: 'full' | 'off'
   countdown: boolean
   now: number
+  /** `view: "pnl"` only; already priced (pricedHoldings) - board.tsx only formats */
+  holdings: PricedHolding[]
+  holdingsSource: string
+  holdingsAt: number
+  holdingsPage: number
+  holdingsPageCount: number
 }
 
 /** how long after a page change the outgoing rows are still worth turning from */
 const PAGE_TURN_WINDOW_MS = 2500
+/** holdings per page in the pnl view - rows 2..6 of its 8-row board */
+const PNL_PAGE_SIZE = 5
 
 function buildProps(
   now: number,
@@ -1016,6 +1195,18 @@ function buildProps(
   const idxValue = quotesFile?.index ? quotesFile.index.value : conf.indexClose * (1 + idxPct / 100)
   const idxChange = quotesFile?.index ? quotesFile.index.change : idxValue - conf.indexClose
 
+  // The pnl view's own list and paging - see the `holdingsPage` module state
+  // comment for why it is not the watchlist's `page`.
+  const { holdings: rawHoldings, source: holdingsSource, asOf: holdingsAt } = holdingsFor(
+    market,
+    lastHoldingsFile,
+    cfg,
+  )
+  const priced = pricedHoldings(rawHoldings, quotesFile)
+  const holdingsPages = Math.max(1, Math.ceil(priced.length / PNL_PAGE_SIZE))
+  lastHoldingsPageCount = holdingsPages
+  const holdingsPageIdx = ((holdingsPage % holdingsPages) + holdingsPages) % holdingsPages
+
   return {
     market,
     marketLabel: conf.label,
@@ -1063,6 +1254,15 @@ function buildProps(
     sessionOpen: hhmm(conf.open),
     sessionClose: hhmm(conf.close),
     now,
+    // The full priced list, not just the page on screen: board.tsx slices it
+    // itself for the 5 rows it draws (holdingsPage says which slice), but it
+    // also sums the footer's totals over the whole portfolio, which a
+    // pre-sliced list could not answer.
+    holdings: priced,
+    holdingsSource,
+    holdingsAt,
+    holdingsPage: holdingsPageIdx,
+    holdingsPageCount: holdingsPages,
   }
 }
 
@@ -1072,6 +1272,10 @@ function buildProps(
 // changes the view on the same frame instead of waiting out a refresh tick.
 let ready = false
 let lastFile: QuotesFile | undefined // .claude/stock-quotes.json, while it is fresh
+let lastHoldingsFile: HoldingsFile | undefined // .claude/stock-holdings.json; never expired, see parseHoldingsFile
+// when spawnShioaji last ran, so it is never re-run more than once a minute
+// (see spawnShioaji's own comment for the full respawn rule)
+let lastShioajiSpawn = 0
 // the feed's last good snapshot per market, with the one before it for the
 // turn. Keyed by market because a snapshot must never reach the other board:
 // US prices under 加權指數 would be worse than no prices at all.
@@ -1124,6 +1328,13 @@ let turnSeq = 0
 // need it and neither can work out the market's list on its own, so buildProps
 // - which runs on every render - leaves it here.
 let lastPageCount = 1
+
+// The pnl view's own page, kept apart from the watchlist's `page` above: the
+// two views can never be on screen together, but their page counts differ
+// (5 holdings a page vs. 5 or 10 watchlist rows) and a shared counter would
+// leave the pnl view on whatever page the watchlist happened to be on.
+let holdingsPage = 0
+let lastHoldingsPageCount = 1
 
 function pageCount(): number {
   return lastPageCount
@@ -1248,6 +1459,7 @@ const MOON = '☽'
 // being charted rather than the market
 const TABLE_BOARD_ROWS = 8
 const CHART_BOARD_ROWS = 8
+const PNL_BOARD_ROWS = 8
 
 function charWidth(ch: string): number {
   const cp = ch.codePointAt(0) ?? 0
@@ -1312,9 +1524,11 @@ export const register: Register = on => {
       const now = await $.clock.now()
       const configText = await readOptional(CONFIG_PATH)
       const quotesText = await readOptional(QUOTES_PATH)
+      const holdingsText = await readOptional(HOLDINGS_PATH)
 
       config = parseConfig(configText)
       lastFile = parseQuotes(quotesText, now)
+      lastHoldingsFile = parseHoldingsFile(holdingsText)
       ready = true
       autoPage(now)
       // redraw while snoozed too, so the collapsed row's countdown ticks down
@@ -1443,7 +1657,7 @@ export const register: Register = on => {
     }
 
     const feedUs = async (now: number) => {
-      const list = config.lists.us
+      const list = [...config.lists.us, ...holdingExtras('us', config.lists.us, config)]
       const symbols = [...list.map(t => t.code), ...US_INDICES.map(i => i.symbol)]
       const answer = await fetchSpark(symbols, now, '')
       if (!answer) return
@@ -1468,31 +1682,38 @@ export const register: Register = on => {
      * bars, so the chart view still goes to Yahoo per symbol the way the US
      * one does, whichever twSource prices the table.
      */
+    // Taiwan via Yahoo - its own function because `twSource: "shioaji"`'s
+    // spawn failure path (spawnShioaji) falls back to exactly this, not to
+    // feedTw as a whole (which would otherwise re-read config.twSource and,
+    // being 'shioaji', fall through to the MIS branch below instead).
+    const feedTwYahoo = async (now: number) => {
+      const list = [...config.lists.tw, ...holdingExtras('tw', config.lists.tw, config)]
+      if (list.length === 0) return
+      const symbols = [...list.map(t => yahooSymbol('tw', t)), TW_YAHOO_INDEX]
+      const answer = await fetchSpark(symbols, now, ' (台股)')
+      if (!answer) return
+      feedFailures = 0
+      publish({
+        market: 'tw',
+        list,
+        parsed: answer.quotes,
+        keyOf: t => yahooSymbol('tw', t),
+        indices: [{ key: TW_YAHOO_INDEX, name: 'TAIEX' }],
+        indexKey: TW_YAHOO_INDEX,
+        tradedAt: answer.tradedAt,
+        now,
+        // Yahoo's Taiwan quotes are about twenty minutes behind, and the
+        // footer has to say so rather than claim 即時
+        sourceLabel: 'Yahoo 延遲',
+        barLabel: '5 分 K',
+      })
+    }
+
     const feedTw = async (now: number) => {
-      const list = config.lists.tw
+      const list = [...config.lists.tw, ...holdingExtras('tw', config.lists.tw, config)]
       if (list.length === 0) return
 
-      if (config.twSource === 'yahoo') {
-        const symbols = [...list.map(t => yahooSymbol('tw', t)), TW_YAHOO_INDEX]
-        const answer = await fetchSpark(symbols, now, ' (台股)')
-        if (!answer) return
-        feedFailures = 0
-        publish({
-          market: 'tw',
-          list,
-          parsed: answer.quotes,
-          keyOf: t => yahooSymbol('tw', t),
-          indices: [{ key: TW_YAHOO_INDEX, name: 'TAIEX' }],
-          indexKey: TW_YAHOO_INDEX,
-          tradedAt: answer.tradedAt,
-          now,
-          // Yahoo's Taiwan quotes are about twenty minutes behind, and the
-          // footer has to say so rather than claim 即時
-          sourceLabel: 'Yahoo 延遲',
-          barLabel: '5 分 K',
-        })
-        return
-      }
+      if (config.twSource === 'yahoo') return feedTwYahoo(now)
 
       // the first entry is the one the market is read by, so an empty list
       // would leave the board with no headline index at all - parseTwIndices
@@ -1537,8 +1758,114 @@ export const register: Register = on => {
       for (const market of feedMarkets(config, onScreen)) {
         if (!marketNeedsFeed(now, market)) continue
         if (market === 'us') await feedUs(now)
+        // twSource: "shioaji" hands Taiwan to the spawned script instead of
+        // calling an HTTP endpoint itself - the script writes the quotes file
+        // this module already reads as an override (QUOTES_PATH). While the
+        // file is fresh, spawnShioaji does nothing beyond the heartbeat; while
+        // it is stale (script not logged in yet, or dead) spawnShioaji ALSO
+        // prices Taiwan through Yahoo for this tick, since the spawn's own
+        // exit code cannot tell this module the backgrounded script failed.
+        else if (config.twSource === 'shioaji') await spawnShioaji(now)
         else await feedTw(now)
       }
+    }
+
+    /**
+     * `twSource: "shioaji"` route: spawn (or re-check) the fetcher script
+     * rather than call an HTTP endpoint. See the ShioajiConfig doc comment
+     * for why this cannot run inside the hooks module directly, and Config's
+     * `twSource` doc for what the script's quotes file replaces.
+     *
+     * Respawn rule: once at session start (the first feed tick), then only
+     * when the quotes file has gone stale (>120s, i.e. no script is feeding
+     * it) AND the last spawn attempt was more than 60s ago - so a script
+     * that is merely slow to log in is never spawned a second time on top of
+     * itself, and a script that died is retried at most once a minute.
+     */
+    const spawnShioaji = async (now: number) => {
+      const project = await $.session.cwd()
+      const heartbeatPath = `${project}/.claude/stock-band.heartbeat`
+      // Written every tick the Shioaji route is wanted, whether or not this
+      // call ends up spawning - it is the signal the script watches: it
+      // exits by itself once the heartbeat is older than 90s (band closed,
+      // or moved to the US board), so a session that stops asking for
+      // Taiwan prices does not leave the script running forever.
+      try {
+        await $.fs.write(heartbeatPath, String(now))
+      } catch (err) {
+        $.ui.log(`tw-stock-mod: could not write the shioaji heartbeat: ${err}`)
+      }
+      const stale = !lastFile || now - lastFile.asOf > QUOTE_STALE_MS
+      if (!stale) return
+
+      // Respawn is cooldown-gated (once a minute at most); the Yahoo
+      // fallback below is NOT - see the comment past the spawn for why it
+      // has to run on every stale tick regardless of whether this tick
+      // attempted a spawn.
+      if (!lastShioajiSpawn || now - lastShioajiSpawn >= 60_000) {
+        lastShioajiSpawn = now
+        const home = await $.env.get('HOME')
+        const expand = (p: string) => (home && p.startsWith('~') ? home + p.slice(1) : p)
+        const python = expand(config.shioaji.python)
+        const env = expand(config.shioaji.env)
+        const script = `${$.plugin.root}/scripts/fetch-quotes-shioaji.py`
+        const logPath = `${project}/.claude/stock-shioaji.log`
+        const pidPath = `${project}/.claude/stock-shioaji.pid`
+        try {
+          // `nohup ... >>log 2>&1 &`, wrapped in `/bin/sh -c`, is what lets
+          // $.process.run resolve at all: run() is one-shot and waits for
+          // the child's stdout/stderr pipes to close as well as its exit,
+          // and a long-lived daemon's pipes never close on their own.
+          // Redirecting them to the log file gives the wrapper's OWN
+          // short-lived pipes something to close immediately - `&`
+          // backgrounds the real script before that happens, so run() sees
+          // the wrapper exit at once while the script keeps going past it,
+          // logging to logPath instead of to a pipe nothing is reading.
+          //
+          // This also means the wrapper resolves with exitCode 0 whether or
+          // not the BACKGROUNDED script itself goes on to fail (missing
+          // python, missing env file, a bad login) - that failure happens
+          // after `sh -c` has already returned, so this try/catch can only
+          // ever catch a failure to launch the shell itself, never a
+          // failure inside the detached job. The only signal this module
+          // can observe for "the script isn't feeding the file" is the file
+          // staying stale, which is exactly what the Yahoo fallback below
+          // reacts to - it does not depend on this try/catch firing.
+          await $.process.run(
+            [
+              '/bin/sh',
+              '-c',
+              `nohup "$0" "$@" >>"${logPath}" 2>&1 &`,
+              python,
+              script,
+              '--project',
+              project,
+              '--env',
+              env,
+              '--interval',
+              String(config.shioaji.interval),
+              '--heartbeat',
+              heartbeatPath,
+              '--pidfile',
+              pidPath,
+            ],
+            { cwd: project, timeoutMs: 15000 },
+          )
+        } catch (err) {
+          // The shell itself failed to launch (e.g. no /bin/sh) - logged,
+          // but not fatal: the Yahoo fallback below covers this tick too.
+          $.ui.log(`tw-stock-mod: shioaji spawn failed (${err})`)
+        }
+      }
+
+      // A missing python, a missing env file, or a dead login all show up
+      // the same way from here: the quotes file stays stale. Rather than
+      // wait out QUOTE_STALE_MS and fall all the way back to demo prices,
+      // every stale tick also prices Taiwan through Yahoo - a fresh quotes
+      // file, once the script does log in, wins over this on the very next
+      // poll (quotesFor prefers `lastFile` unconditionally), so this is a
+      // bridge, not a competing source.
+      await feedTwYahoo(now)
     }
 
     // K bars cost one request per symbol, so only the symbol the trend view is
@@ -1672,16 +1999,27 @@ export const register: Register = on => {
       focus = 0
       $.ui.invalidate('ui.render')
     }
+    // 損益 opens the pnl view the same way 趨勢圖 opens the chart one - its own
+    // button, its own paging state (holdingsPage, not the watchlist's page).
+    const onPnl = () => {
+      view = 'pnl'
+      $.ui.invalidate('ui.render')
+    }
+    const onHoldingsPage = () => {
+      holdingsPage = (props.holdingsPage + 1) % props.holdingsPageCount
+      $.ui.invalidate('ui.render')
+    }
 
     // The market button carries the market name ON THE BAND and nothing else:
     // 台股 ▾ / 美股 ▾. It tracks the clock until the first press, then toggles.
     const open = props.phase === 'open'
-    // Two views, two names, so every line in the button row below can read
-    // forwards: `table ? 元素 : null` and `chart ? 元素 : null`, never
-    // `chart ? null : 元素`, which says what does NOT draw and has to be
-    // reversed in the head before it says anything.
+    // Three views, three names, so every line in the button row below can
+    // read forwards: `table ? 元素 : null`, `chart ? 元素 : null`, `pnl ?
+    // 元素 : null`, never a negation that says what does NOT draw and has to
+    // be reversed in the head before it says anything.
     const chart = props.view === 'chart'
-    const table = !chart
+    const pnl = props.view === 'pnl'
+    const table = props.view === 'table'
     const marketLabel = marketButtonLabel(props.marketLabel)
     // 09:30-16:00 ET answers the wrong question in Taipei, so taipeiNote
     // restates it in local time - but only if it still fits: there is no way
@@ -1716,7 +2054,7 @@ export const register: Register = on => {
             {chart ? (
               <Button key="stock-band:next" label={`下一檔 ▶ ${focus + 1}/${rowCount}`} onPress={onNext} />
             ) : null}
-            {chart ? <Button key="stock-band:list" label="回清單" onPress={onList} /> : null}
+            {chart || pnl ? <Button key="stock-band:list" label="回清單" onPress={onList} /> : null}
             {table ? <Text> </Text> : null}
             {table ? (
               <Text color={open ? ORANGE : MOON_BLUE}>{`${open ? SUN : MOON} ${open ? '盤中' : '休市'}`}</Text>
@@ -1734,7 +2072,15 @@ export const register: Register = on => {
                 onPress={onPage}
               />
             ) : null}
+            {pnl && props.holdingsPageCount > 1 ? (
+              <Button
+                key="stock-band:pnl-page"
+                label={`翻頁 ${props.holdingsPage + 1}/${props.holdingsPageCount}`}
+                onPress={onHoldingsPage}
+              />
+            ) : null}
             {table ? <Button key="stock-band:trend" label="趨勢圖" onPress={onTrend} /> : null}
+            {table ? <Button key="stock-band:pnl" label="損益" onPress={onPnl} /> : null}
             <Button key="stock-band:snooze" label="收起 30分" onPress={onSnooze} />
           </Box>
         </Box>
@@ -1742,7 +2088,7 @@ export const register: Register = on => {
           key="stock-band:table"
           module="./board.tsx"
           width={cols}
-          height={props.view === 'chart' ? CHART_BOARD_ROWS : TABLE_BOARD_ROWS}
+          height={props.view === 'chart' ? CHART_BOARD_ROWS : props.view === 'pnl' ? PNL_BOARD_ROWS : TABLE_BOARD_ROWS}
           props={{ ...props }}
         />
         {await next(e)}
