@@ -1733,12 +1733,16 @@ export const register: Register = on => {
           bars: `${props.barLabel} · ${open ? `${SUN} 盤中` : `${MOON} 休市`}`,
         }
       : undefined
-    // what the chart's own buttons take, so the title knows what room is left
-    const CHART_BUTTON_COLS = 34
+    // What the chart's own three buttons take, measured off a real 120-column
+    // render, so the title knows what room is left. The right-hand group is
+    // only 收起 30分 here - 翻頁 and 趨勢圖 are table-only - so reserving the
+    // table's budget for it dropped the bar interval with 30 columns to spare.
+    const CHART_BUTTON_COLS = 42
+    const CHART_RIGHT_COLS = 20
     const titleCore = chartTitle ? dispWidth(marketLabel) + 1 + dispWidth(`${chartTitle.code} ${chartTitle.price} ${chartTitle.move}`) : 0
     const showChartName =
       chartTitle !== undefined &&
-      titleCore + 1 + dispWidth(chartTitle.name) + CHART_BUTTON_COLS + RIGHT_BUTTON_GROUP_COLS <= cols
+      titleCore + 1 + dispWidth(chartTitle.name) + CHART_BUTTON_COLS + CHART_RIGHT_COLS <= cols
     const showChartBars =
       chartTitle !== undefined &&
       titleCore +
@@ -1746,7 +1750,7 @@ export const register: Register = on => {
         1 +
         dispWidth(chartTitle.bars) +
         CHART_BUTTON_COLS +
-        RIGHT_BUTTON_GROUP_COLS <=
+        CHART_RIGHT_COLS <=
         cols
 
     const showTaipei =
