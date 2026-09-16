@@ -902,9 +902,9 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     // row 8: where you are in the list, how to move, and the data source
     const foot = rows[8]
     foot.put(lay.symCol, `${quotes.length} 檔中第 ${focus + 1} 檔`, DIM)
-    // no hotkey letter here: 趨勢圖 has none any more (register.tsx), so this
-    // names the button rather than a key that no longer exists
-    foot.put(foot.width() + 2, '趨勢圖換下一檔 / 回清單', DIM)
+    // The chart view's own buttons now sit in the button row above, left-
+    // aligned and named for what they do, so this line no longer has to
+    // explain that one button means three things.
     signOff(foot, lay.pctRight)
   } else {
     // row 0: column headers. row 1: rule. The market name, session state,

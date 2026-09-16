@@ -1587,22 +1587,33 @@ export const register: Register = on => {
       setPage((props.page + 1) % props.pageCount, now)
       $.ui.invalidate('ui.render')
     }
+    // One button used to do all three jobs - enter the chart, step to the next
+    // symbol, and fall back to the table on the last one - which left no way
+    // back to the symbol you just passed and no way out except walking to the
+    // end. The chart view now gets its own three buttons, and 趨勢圖 only ever
+    // opens the view.
     const onTrend = () => {
-      if (view === 'table') {
-        view = 'chart'
-        focus = 0
-      } else if (focus + 1 < rowCount) {
-        focus += 1
-      } else {
-        view = 'table'
-        focus = 0
-      }
+      view = 'chart'
+      focus = 0
+      $.ui.invalidate('ui.render')
+    }
+    const step = (by: number) => () => {
+      const n = Math.max(1, rowCount)
+      focus = (focus + by + n) % n
+      $.ui.invalidate('ui.render')
+    }
+    const onPrev = step(-1)
+    const onNext = step(1)
+    const onList = () => {
+      view = 'table'
+      focus = 0
       $.ui.invalidate('ui.render')
     }
 
     // The market button carries the market name ON THE BAND and nothing else:
     // 台股 ▾ / 美股 ▾. It tracks the clock until the first press, then toggles.
     const open = props.phase === 'open'
+    const chart = props.view === 'chart'
     const marketLabel = marketButtonLabel(props.marketLabel)
     // 09:30-16:00 ET answers the wrong question in Taipei, so taipeiNote
     // restates it in local time - but only if it still fits: there is no way
@@ -1613,7 +1624,9 @@ export const register: Register = on => {
       dispWidth(marketLabel) + 1 + dispWidth(`${open ? SUN : MOON} ${open ? '盤中' : '休市'}`) + 1 +
       dispWidth(props.sessionNote)
     const showTaipei =
-      props.taipeiNote !== '' && leftCoreWidth + 1 + dispWidth(props.taipeiNote) + RIGHT_BUTTON_GROUP_COLS <= cols
+      !chart &&
+      props.taipeiNote !== '' &&
+      leftCoreWidth + 1 + dispWidth(props.taipeiNote) + RIGHT_BUTTON_GROUP_COLS <= cols
 
     // No hotkeys on any of these (2026-09-16, at the user's request: 先不加
     // 上快捷鍵). A letter hotkey only fires once one of the band's Buttons
@@ -1627,26 +1640,33 @@ export const register: Register = on => {
         <Box flexDirection="row" justifyContent="space-between">
           <Box flexDirection="row">
             <Button key="stock-band:market" label={marketLabel} onPress={onSwitch} />
-            <Text> </Text>
-            <Text color={open ? ORANGE : MOON_BLUE}>{`${open ? SUN : MOON} ${open ? '盤中' : '休市'}`}</Text>
-            <Text> </Text>
-            <Text color={DIM}>{props.sessionNote}</Text>
+            {/* The chart view's controls sit here, next to the symbol they move
+                through, rather than stranded on the far right where the eye is
+                not. The session state and hours give up the space because the
+                chart draws its own title row with both already on it. */}
+            {chart ? <Button key="stock-band:prev" label="◀ 上一檔" onPress={onPrev} /> : null}
+            {chart ? (
+              <Button key="stock-band:next" label={`下一檔 ▶ ${focus + 1}/${rowCount}`} onPress={onNext} />
+            ) : null}
+            {chart ? <Button key="stock-band:list" label="回清單" onPress={onList} /> : null}
+            {chart ? null : <Text> </Text>}
+            {chart ? null : (
+              <Text color={open ? ORANGE : MOON_BLUE}>{`${open ? SUN : MOON} ${open ? '盤中' : '休市'}`}</Text>
+            )}
+            {chart ? null : <Text> </Text>}
+            {chart ? null : <Text color={DIM}>{props.sessionNote}</Text>}
             {showTaipei ? <Text> </Text> : null}
             {showTaipei ? <Text color={DIM}>{props.taipeiNote}</Text> : null}
           </Box>
           <Box flexDirection="row">
-            {props.pageCount > 1 && props.view === 'table' ? (
+            {props.pageCount > 1 && !chart ? (
               <Button
                 key="stock-band:page"
                 label={`翻頁 ${props.page + 1}/${props.pageCount}`}
                 onPress={onPage}
               />
             ) : null}
-            <Button
-              key="stock-band:trend"
-              label={view === 'chart' ? `趨勢 ${focus + 1}/${rowCount}` : '趨勢圖'}
-              onPress={onTrend}
-            />
+            {chart ? null : <Button key="stock-band:trend" label="趨勢圖" onPress={onTrend} />}
             <Button key="stock-band:snooze" label="收起 30分" onPress={onSnooze} />
           </Box>
         </Box>

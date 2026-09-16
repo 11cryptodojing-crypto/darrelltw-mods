@@ -116,7 +116,11 @@ highlighted top mover:
   what puts a fresh session back on the clock.) The session state (`☀ 盤中` orange /
   `☾ 休市` blue), the hours, and — when there is room — the same hours restated
   in Taipei time sit next to it. `翻頁` / `趨勢圖` / `收起 30 分` stay
-  right-aligned in the same row. **No hotkeys**: a letter hotkey only fires
+  right-aligned in the same row. **In the trend view the row changes**: the
+  session state and hours step aside (the chart draws its own title with both
+  on it) and `◀ 上一檔` / `下一檔 ▶ n/N` / `回清單` take that space, left-
+  aligned beside the market button — next to the symbol they move through,
+  rather than across the terminal from it. **No hotkeys**: a letter hotkey only fires
   once a Button already holds the focus ring, which buys nothing over Enter,
   and a digit hotkey would eat a prompt that starts with that digit — every
   button here is a click, or focus then Enter.
@@ -159,11 +163,12 @@ highlighted top mover:
 ## The trend view (K bars)
 
 ```
+ 台股 ▾  ◀ 上一檔  下一檔 ▶ 2/10  回清單                        [收起 30分]
  2330 台積電  1,188.29 ▲ +23.29 (+2.00%)           K 棒（示範）· 台股 ☀ 盤中
  ▀▄          ▄▀▀▀▀▄          ▄▀▄▀▀          ▄▄▀▄▀▄          ▄▀▀   1,190.77
   ...candles, one per two columns, red/green by bar direction...
  09:00────────────────────────11:15───────────────────────13:30
- 20 檔中第 1 檔  趨勢圖換下一檔 / 回清單           示範資料（未接 API） · darrell_tw_
+ 10 檔中第 2 檔                                    示範資料（未接 API） · darrell_tw_
 ```
 
 Same 9 rows as the button row draws it into, one symbol's candles instead of
@@ -179,8 +184,15 @@ close / low; the axis under the plot is the session's own clock.
 
 Bars come from the quotes file (`bars`), so with no feed connected the chart
 draws demo bars and says so in the title. Only the focused symbol's bars are
-sent to the board — pressing 趨勢圖 walks one symbol at a time and then
-returns to the table.
+sent to the board, which is why moving through the list is a button press
+rather than a scroll.
+
+**Three buttons, one job each.** `◀ 上一檔` and `下一檔 ▶` step through the
+symbols on the current page and wrap around at both ends; `回清單` leaves.
+They replace a single `趨勢圖` button that used to mean all three things at
+once — enter the view, step forward, and fall out to the table on the last
+symbol — which left no way back to the symbol you had just passed and no exit
+except walking to the end of the list.
 
 ## Configure
 
