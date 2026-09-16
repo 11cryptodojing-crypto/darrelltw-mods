@@ -198,13 +198,20 @@ watchlist, copy [`stock-band.example.json`](stock-band.example.json) to
 | `feed` | `"auto"` | `auto` prices whichever market is on the band; `both` keeps the other side warm; `tw`/`us` pins one; `off` = demo prices only |
 | `twSource` | `"yahoo"` | `yahoo` = Yahoo (~20 min behind Taiwan, but one request whatever the list length); `mis` = 證交所 intraday (real time) |
 | `feedMs` | `30000` | seconds between feed requests, in ms (floor 15000 — below that Yahoo answers 429; the request budget can widen it further) |
+| `pageMs` | `10000` | how long one page holds before the board turns, in ms (floor 4000; `0` turns auto-paging off and leaves `翻頁` as the only way to page). Pressing `翻頁` restarts this countdown |
 | `tw` / `us` | built-in lists | `{ code, name, prevClose }` per symbol; only `code` is required. Taiwan 上櫃 symbols need `"ex": "otc"` (e.g. 6488 環球晶) |
 
-The built-in Taiwan list is 20 symbols (`columns` then resolves to 2 by
-default); the built-in US list is 5 (single-column by default). A page holds
-10 symbols in two-column mode and 5 in single-column mode — past that the
-watchlist pages, and `翻頁` / the rule's page tag only show up once there is a
-second page.
+Both built-in lists are 20 symbols, so `columns` resolves to 2 and each page
+holds 10 (a single-column page holds 5). Past that the watchlist pages, and
+`翻頁` / the rule's page tag only show up once there is a second page.
+
+**Pressing `翻頁` restarts the auto-page countdown.** The page clock is a
+deadline measured from when the current page arrived, not an interval ticking
+on its own — an interval cannot be reset, so pressing the button 9.9 s into a
+10 s interval used to leave the page you asked for on screen for 100 ms before
+the interval fired and took it away. The check rides the `refreshMs` poll
+rather than owning a timer, so an automatic turn lands up to `refreshMs` after
+its deadline: with the defaults, a page holds 10–13 s instead of exactly 10.
 
 ## The live feed
 

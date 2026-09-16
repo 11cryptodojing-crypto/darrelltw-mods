@@ -1066,6 +1066,36 @@ function pageCount(): number {
   return lastPageCount
 }
 
+/**
+ * Turn the page when the one on the board has had its `pageMs`, and not a tick
+ * sooner. It rides the config poll rather than owning a timer of its own,
+ * because a timer of its own cannot be reset: pressing 翻頁 at 9.9 s of a 10 s
+ * interval used to leave the page you asked for on screen for 100 ms before
+ * the interval fired and took it away. `pageAt` already records when the page
+ * arrived and `setPage` already updates it, so a manual press pushes the
+ * deadline out for free. The cost is granularity - the turn lands on the next
+ * poll after the deadline, so up to `refreshMs` late, which at a 10 s page and
+ * a 3 s poll is invisible next to the 100 ms flash it replaces.
+ */
+function autoPage(now: number) {
+  if (config.pageMs <= 0) return
+  // Nothing to page through, and the chart view owns the list already. Restart
+  // the deadline rather than just returning, so the page gets its full hold
+  // from the moment it is back on screen instead of turning the instant you
+  // come back from the chart or from 收起.
+  if (now < snoozedUntil || view !== 'table' || pageCount() < 2) {
+    pageAt = now
+    return
+  }
+  // first poll of the session: start the clock, do not turn off a zero
+  if (pageAt === 0) {
+    pageAt = now
+    return
+  }
+  if (now - pageAt < config.pageMs) return
+  setPage((page + 1) % pageCount(), now)
+}
+
 function setPage(next: number, now: number) {
   if (next === page) return
   pageFrom = lastShown
@@ -1188,6 +1218,7 @@ export const register: Register = on => {
       config = parseConfig(configText)
       lastFile = parseQuotes(quotesText, now)
       ready = true
+      autoPage(now)
       // redraw while snoozed too, so the collapsed row's countdown ticks down
       $.ui.invalidate('ui.render')
     }
@@ -1449,20 +1480,6 @@ export const register: Register = on => {
       await feed().catch(err => $.ui.log(`tw-stock-mod: feed failed: ${err}`))
       $.clock.every(every, () => {
         feed().catch(err => $.ui.log(`tw-stock-mod: feed failed: ${err}`))
-      })
-    }
-
-    // Auto-paging lives here, not in the board, so the page button's label
-    // stays honest and one press can take the page over from the clock.
-    if (config.pageMs > 0) {
-      $.clock.every(config.pageMs, () => {
-        void (async () => {
-          const now = await $.clock.now()
-          // nothing to page through, and the chart view owns the list already
-          if (now < snoozedUntil || view !== 'table' || pageCount() < 2) return
-          setPage((page + 1) % pageCount(), now)
-          $.ui.invalidate('ui.render')
-        })().catch(err => $.ui.log(`tw-stock-mod: page turn failed: ${err}`))
       })
     }
 
