@@ -456,10 +456,8 @@ const pickers = new WeakMap<object, Picker>()
 // the header. The chart view keeps its own title row - it names the symbol
 // being charted, not the market, so it stays inside the board.
 const TABLE_ROWS = 8 // header, rule, 5 quote rows, footer
-const CHART_ROWS = 8 // 6 candle rows, axis, footer - the symbol and its
-// price now ride in the button row register.tsx draws above this Client, so
-// both views are the same height and the band no longer grows by a line when
-// the chart opens
+const CHART_ROWS = 8 // title, 5 candle rows, axis, footer - the same height
+// as the table, so opening a chart no longer pushes the transcript up a line
 const TABLE_QUOTE_ROWS = 5 // rows in the quote area, in single- or two-column mode
 const MAX_TABLE_QUOTES = TABLE_QUOTE_ROWS * 2 // two-column mode holds 2 symbols a row
 
@@ -646,7 +644,9 @@ function fitsTwoColumns(width: number): boolean {
 // Two pixel rows per terminal row via half-block characters, the same trick
 // the deploy band uses for Clawd: a cell with both halves lit is '▀' with the
 // top color as fg and the bottom color as bg.
-const CHART_PLOT_ROWS = 6 // -> 12 pixel rows of vertical resolution
+const CHART_PLOT_ROWS = 5 // -> 10 pixel rows of vertical resolution. One row
+// fewer than the table's five quotes plus header and rule, so that the chart's
+// own title row (which names the symbol) fits without the band growing.
 const AXIS_W = 10
 const BAR_STRIDE = 2 // one candle column + one gap column, so bodies stay distinct
 const PREV_LINE = '#3a404b'
@@ -905,15 +905,24 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     const color = tone(props.market, q.pct)
     const plotW = Math.max(10, lay.pctRight - 2 - AXIS_W)
 
-    // rows 0..5: the candles, with a price axis on the right
+    // row 0: which symbol this is, its price, what the bars are
+    const title = rows[0]
+    title.put(lay.symCol, q.code, SYMBOL)
+    title.put(title.width() + 1, q.name, DIM)
+    title.put(title.width() + 2, thousands(q.price), WHITE)
+    const arrow = q.pct > 0 ? '▲' : q.pct < 0 ? '▼' : '-'
+    title.put(title.width() + 1, `${arrow} ${signed(q.change)} (${signed(q.pct)}%)`, color)
+    title.putRightIfFits(lay.pctRight, `${props.barLabel} · ${props.marketLabel} ${open ? `${SUN} 盤中` : `${MOON} 休市`}`, DIM)
+
+    // rows 1..6: the candles, with a price axis on the right
     const candles = candleCells(q.bars ?? [], props.market, q.prevClose, plotW, false)
-    for (let j = 0; j < CHART_PLOT_ROWS; j++) rows[j].putCells(lay.badgeCol, candles.rows[j])
+    for (let j = 0; j < CHART_PLOT_ROWS; j++) rows[1 + j].putCells(lay.badgeCol, candles.rows[j])
     if ((q.bars?.length ?? 0) === 0) {
-      rows[Math.floor(CHART_PLOT_ROWS / 2)].put(lay.badgeCol + 2, '沒有 K 棒資料（報價檔未提供 bars）', DIM)
+      rows[1 + Math.floor(CHART_PLOT_ROWS / 2)].put(lay.badgeCol + 2, '沒有 K 棒資料（報價檔未提供 bars）', DIM)
     } else {
-      rows[0].putRight(lay.pctRight, thousands(candles.hi), DIM)
-      rows[Math.floor(CHART_PLOT_ROWS / 2)].putRight(lay.pctRight, thousands(q.prevClose), '#5a6370')
-      rows[CHART_PLOT_ROWS - 1].putRight(lay.pctRight, thousands(candles.lo), DIM)
+      rows[1].putRight(lay.pctRight, thousands(candles.hi), DIM)
+      rows[1 + Math.floor(CHART_PLOT_ROWS / 2)].putRight(lay.pctRight, thousands(q.prevClose), '#5a6370')
+      rows[CHART_PLOT_ROWS].putRight(lay.pctRight, thousands(candles.lo), DIM)
     }
 
     // row 6: the session's time axis. Row.put only appends, so the axis is
