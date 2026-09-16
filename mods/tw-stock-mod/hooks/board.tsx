@@ -658,7 +658,6 @@ const CHART_PLOT_ROWS = 5 // -> 10 pixel rows of vertical resolution. One row
 // own title row (which names the symbol) fits without the band growing.
 const AXIS_W = 10
 const BAR_STRIDE = 2 // one candle column + one gap column, so bodies stay distinct
-const PREV_LINE = '#3a404b'
 
 function darken(hex: string): string {
   const v = hex.replace('#', '')
@@ -705,10 +704,10 @@ function candleCells(bars: Bar[], market: MarketId, prevClose: number, width: nu
   const rows: Cell[][] = Array.from({ length: CHART_PLOT_ROWS }, () =>
     Array.from({ length: width }, () => ({ ch: ' ' }) as Cell),
   )
-  // the previous close as a faint dotted reference, drawn first so a candle
-  // that crosses it paints over
-  const prevRow = toRow(prevClose)
-  for (let c = 0; c < width; c++) rows[prevRow][c] = { ch: '┈', fg: PREV_LINE }
+  // No reference line across the candles. The candles sit every second column,
+  // so a line drawn through them alternates with the bodies - `█┈█┈█┈` - and
+  // reads as noise rather than as a level. The previous close is already named
+  // on the price axis at the right, on its own row and in its own color.
 
   for (let i = 0; i < merged.length; i++) {
     const c = i * BAR_STRIDE
