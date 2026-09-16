@@ -6,6 +6,10 @@ found with these rather than by reading the diff — the band draws into a
 terminal surface that a screenshot only samples once, so "it looks wrong" is
 never enough to act on.
 
+`check-personal.sh` is separate from the harnesses above - it `rg`s the whole
+repo for personal paths (`your-venv`, `/Users/you`,
+the bare username) and exits 1 on any hit; run it before every release.
+
 ## Build first
 
 ```sh

@@ -43,6 +43,8 @@ const $ = {
       return { ok: res.ok, status: res.status, text }
     },
   },
+  env: { get: async name => (name === 'HOME' ? process.env.HOME : undefined) },
+  session: { cwd: async () => process.cwd() },
   process: {},
 }
 

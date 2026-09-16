@@ -433,7 +433,7 @@ MIS 跟 Yahoo 是「一個 HTTP GET 就有價格」，`$.http.fetch` 直接打�
 - `snapshot.close` 就是最後成交價，**不會像 MIS 的 `z` 出現 `-`**，沒有「這一刻
   沒成交」的洞要補。
 - `login(subscribe_trade=False)` 可以不訂閱委託回報，只要報價。
-- 環境：shioaji 鎖 Python ≤ 3.13。本機能跑的是 `~/.venvs/shioaji`
+- 環境：shioaji 鎖 Python ≤ 3.13。本機能跑的是本機的 venv
   （Python 3.12.6 + shioaji 1.7.2）；homebrew 那個 python@3.14 下的 shioaji 1.3.3
   `import` 得到但不是拿來用的。
 - `api.Contracts` 會噴 DeprecationWarning（v2 改叫 `api.contracts`），功能還在。

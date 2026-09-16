@@ -6,11 +6,14 @@ here — exact requests, exact bytes back, exact failures — lives in
 [`docs/stock-api-notes.md`](../../../docs/stock-api-notes.md). Read this page
 to choose a source; read that one to see the evidence.
 
-Every route below writes into the same two places the band already reads:
-`hooks/register.tsx`'s built-in feed (Yahoo, MIS) or the
-`<project>/.claude/stock-quotes.json` override file (everything else). Nothing
-you configure changes `hooks/board.tsx` — the band does not know or care which
-route filled in a number.
+Every route below writes into one of the same places the band already reads:
+`hooks/register.tsx`'s built-in feed (Yahoo, MIS), the runtime-dir override
+file at `~/.claude/stock-band/<project-slug>/stock-quotes.json` (what
+`fetch-quotes-shioaji.py` writes), or the project's own
+`<project>/.claude/stock-quotes.json` as a manual override (read order:
+runtime dir while fresh, then the project file, then the built-in feed).
+Nothing you configure changes `hooks/board.tsx` — the band does not know or
+care which route filled in a number.
 
 ## Compare the routes
 
@@ -44,7 +47,7 @@ project and therefore never lands in version control:
 // ~/.claude/stock-band.json
 {
   "twSources": ["shioaji", "yahoo", "mis"],
-  "shioaji": { "python": "~/.venvs/shioaji/bin/python3", "env": "~/.sinobon.env", "interval": 10 }
+  "shioaji": { "python": "python3", "env": "~/.sinobon.env", "interval": 10 }
 }
 ```
 
@@ -133,10 +136,14 @@ request for the whole watchlist) sits far under anything tested.
 
 ## 3. The quotes-file override
 
-Write `<project>/.claude/stock-quotes.json` in the shape of
-[`stock-quotes.example.json`](../stock-quotes.example.json), and the band
-uses it instead of Yahoo or MIS — **this is the seam for any source the
-module does not speak natively**, including Shioaji (§4) and Fugle (§5).
+**Two files, one seam.** `fetch-quotes-shioaji.py` (and the band, when it
+spawns it) writes `~/.claude/stock-band/<project-slug>/stock-quotes.json`,
+which wins while fresh; `<project>/.claude/stock-quotes.json` is the
+hand-editable seam below, and wins over the built-in feed whenever the
+runtime-dir file is not fresh. Write `<project>/.claude/stock-quotes.json` in
+the shape of [`stock-quotes.example.json`](../stock-quotes.example.json), and
+the band uses it instead of Yahoo or MIS — **this is the seam for any source
+the module does not speak natively**, including Shioaji (§4) and Fugle (§5).
 
 **The contract.** A file with these keys:
 
@@ -179,11 +186,19 @@ treated exactly like no file.
 
 **What you need:**
 
-- A 永豐金 brokerage account with the API enabled and 簽署中心 passed.
-- `SINOBON_API_KEY` / `SINOBON_SECRET_KEY` in an env file outside the repo.
-- A Python 3.12 environment with `shioaji` installed (the SDK caps at Python
-  3.13; the working environment on this machine is
-  `~/.venvs/shioaji`, Python 3.12.6, shioaji 1.7.2).
+- A 永豐金 brokerage account with the API enabled and 簽署中心's "Python API
+  測試" passed.
+- A Python 3.12 or 3.13 venv with `shioaji` installed (the SDK caps at Python
+  3.13; one working combination measured here was Python 3.12.6, shioaji
+  1.7.2).
+- `SINOBON_API_KEY` / `SINOBON_SECRET_KEY` in `~/.sinobon.env` (`--env`'s
+  default) or another env file outside the repo.
+- macOS or Linux — the band spawns the script with `nohup`, which Windows
+  does not have.
+- **Run `<python> scripts/fetch-quotes-shioaji.py --check` first.** It
+  diagnoses the Python version, the `shioaji` install, the env file, a real
+  login, and the platform, then exits without writing anything. An HTTP 406
+  on login means 簽署中心's own test was never passed.
 - **A long-lived process.** `api.login()` takes seconds and holds a session —
   measured: `api.usage()` after login reports `connections=1,
   limit_bytes=524288000`. Calling it every 30 seconds the way the built-in
@@ -218,12 +233,14 @@ same script itself, detached (`$.process.run(['/bin/sh', '-c', 'nohup ... &'],
 while the script keeps going past it; see the function's own comment for why).
 The band and the script then talk over two files instead of a socket:
 
-- **The heartbeat** (`.claude/stock-band.heartbeat`) — the band rewrites it
-  every feed tick it wants Taiwan prices; the script exits by itself once
-  that file is missing or more than 90 seconds old, so a closed band or a
-  switch to the US board does not leave a login running forever.
-- **The pidfile** (`.claude/stock-shioaji.pid`) — a second Claude Code
-  session on the same project sees a live pid there and exits at once
+- **The heartbeat** (`stock-band.heartbeat`, in the runtime dir
+  `~/.claude/stock-band/<project-slug>/` — never the project's `.claude/`) —
+  the band rewrites it every feed tick it wants Taiwan prices; the script
+  exits by itself once that file is missing or more than 90 seconds old, so
+  a closed band or a switch to the US board does not leave a login running
+  forever.
+- **The pidfile** (`stock-shioaji.pid`, same runtime dir) — a second Claude
+  Code session on the same project sees a live pid there and exits at once
   instead of logging in twice for the same watchlist.
 
 Respawn is rate-limited on the band's side too: once at session start, then
@@ -236,16 +253,20 @@ window - this covers a missing `python`, a missing env file, or a dead login
 the same way, since all three look identical from here (the quotes file just
 never gets fresher). With only `["shioaji"]` configured, a stale tick falls
 all the way back to demo prices instead, the same as any other feed running
-dry. Script output goes to `.claude/stock-shioaji.log`, not to the band's own
-debug log.
+dry. Script output goes to `stock-shioaji.log`, same runtime dir, not to the
+band's own debug log.
 
 **Turn it on by hand**, the same script, started yourself:
 
 ```sh
-~/.venvs/shioaji/bin/python3 \
+python3 \
   mods/tw-stock-mod/scripts/fetch-quotes-shioaji.py \
-  --env ~/.sinobon.env --project . --interval 10
+  --project . --interval 10
 ```
+
+(use whichever python has `shioaji` installed — a venv's `bin/python3` if
+that is where you `pip install shioaji`, not necessarily the bare `python3`
+above; `--env` defaults to `~/.sinobon.env`)
 
 It reads the same `tw` watchlist out of `<project>/.claude/stock-band.json`,
 so there is nothing else to configure. Stop it with Ctrl-C; the band falls
@@ -308,21 +329,27 @@ MIS does.
 
 ## 6. The holdings file and the 損益 view
 
-`<project>/.claude/stock-holdings.json` is what the 損益 button reads —
-positions, not watchlist prices. `scripts/fetch-quotes-shioaji.py` writes it
-every tick after `list_positions` (§4), and anything else can write it by
-hand or from its own fetcher, in the shape of
+`stock-holdings.json` is what the 損益 button reads — positions, not
+watchlist prices. `scripts/fetch-quotes-shioaji.py` writes it every tick
+after `list_positions` (§4) into the runtime dir
+(`~/.claude/stock-band/<project-slug>/`), which wins whenever it parses;
+`<project>/.claude/stock-holdings.json` is the manual override, and anything
+else can write either one by hand or from its own fetcher, in the shape of
 [`../../stock-holdings.example.json`](../../stock-holdings.example.json):
 
 ```jsonc
-{ "asOf": 1757900000000, "market": "tw", "source": "永豐 庫存",
+{ "asOf": 1757900000000, "market": "tw", "source": "手動庫存",
   "holdings": [ { "code": "2330", "name": "台積電", "qty": 1000, "cost": 980.5, "price": 1188.0, "prevClose": 1165.0 } ] }
 ```
 
 `qty` is shares (股), not 張. `cost` is the average cost per share.
 `price`/`prevClose` are optional — the band prefers a live quote for that
 code first (see the UNION note in §4) and only falls back to these when
-nothing priced that code.
+nothing priced that code. `source` is free text for the footer/title, but a
+project-path file written by hand must never carry `"source": "永豐 庫存"`
+— that label is reserved for `fetch-quotes-shioaji.py`'s own output (§4), and
+the band treats a project-path file with that exact source as a stale copy
+of the fetcher's pre-runtime-dir output and ignores it.
 
 **No staleness rule.** Unlike the quotes file, this one is never expired by
 age: a position does not go wrong just because nobody wrote a fresh copy in

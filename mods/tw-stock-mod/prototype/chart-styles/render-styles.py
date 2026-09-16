@@ -1,6 +1,10 @@
 # 用真的 TSLA 5 分 K，把幾種畫法各畫一次，都塞進 5 個文字列 × 62 欄
+# Usage: python3 render-styles.py <path-to-yahoo-chart-json>
 import json
-d = json.load(open('/tmp/tsla.json'))
+import sys
+
+data_path = sys.argv[1] if len(sys.argv) > 1 else 'tsla.json'
+d = json.load(open(data_path))
 r = d['chart']['result'][0]; q = r['indicators']['quote'][0]
 prev = r['meta']['chartPreviousClose']
 bars = [(o,h,l,c) for o,h,l,c in zip(q['open'],q['high'],q['low'],q['close']) if c is not None]

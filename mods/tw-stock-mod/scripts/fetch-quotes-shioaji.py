@@ -1,7 +1,22 @@
 #!/usr/bin/env python3
 """
-永豐 Shioaji -> <project>/.claude/stock-quotes.json and stock-holdings.json
+永豐 Shioaji -> the runtime dir's stock-quotes.json and stock-holdings.json
 (the band's override seams).
+
+Where it writes: --out-dir, which defaults to the same runtime dir
+hooks/register.tsx computes for --project (`$HOME/.claude/stock-band/<project
+-slug>/`, see runtimeDir() there and runtime_dir() below - the two must keep
+computing the same string). Every machine-written file - stock-quotes.json,
+stock-holdings.json, the heartbeat, the log, the pid file - lives there, never
+in the project's `.claude/`. --project only supplies the `tw` watchlist from
+`<project>/.claude/stock-band.json` and, when --out-dir is not given, the
+string the slug is built from.
+
+Shioaji itself also writes a shioaji.log, into whatever directory the
+process happens to be running from - the SDK gives no way to point that log
+elsewhere. main() therefore chdir()s into out_dir (creating it first) before
+shioaji is imported anywhere, --check included, so that log lands next to
+our own output instead of in the caller's repo.
 
 Why a script and not another branch of the feed: Shioaji is a Python SDK with
 a login that takes seconds and holds a session, so it cannot be called from
@@ -10,17 +25,22 @@ This logs in once, writes both files on a loop, and the band picks them up -
 a fresh quotes file wins over the built-in feed (footer says 永豐 即時), and the
 holdings file feeds the 損益 view (source label 永豐 庫存).
 
-Two ways to run it:
+Three ways to run it:
   * by hand, same as before - stop it with Ctrl-C, the band falls back to its
     own feed 120s later:
 
-      ~/.venvs/shioaji/bin/python3 \
-        mods/tw-stock-mod/scripts/fetch-quotes-shioaji.py \
-        --env ~/.sinobon.env --project . --interval 10
+      python3 mods/tw-stock-mod/scripts/fetch-quotes-shioaji.py \
+        --project . --interval 10
+
+  * a one-off diagnostic - checks the Python version, the shioaji install,
+    the env file, a real login, and the platform, then exits. Writes nothing,
+    needs no --codes:
+
+      python3 mods/tw-stock-mod/scripts/fetch-quotes-shioaji.py --check
 
   * spawned BY the band itself, when `stock-band.json` sets
     `"twSource": "shioaji"` (hooks/register.tsx's spawnShioaji). That path
-    always passes `--heartbeat` and `--pidfile`:
+    always passes `--out-dir`, `--heartbeat` and `--pidfile`:
       - `--heartbeat FILE`: the band rewrites this file's mtime-equivalent
         content on every tick it wants the Shioaji route. Once FILE is
         missing or its timestamp is more than 90s old, this process exits by
@@ -34,9 +54,15 @@ Two ways to run it:
 
 What you need:
   * a 永豐金 account with the API enabled and 簽署中心 passed
-  * SINOBON_API_KEY / SINOBON_SECRET_KEY in an env file (never in the repo)
-  * shioaji installed on Python <= 3.13 (3.12 is what SinoPac tests against)
+  * SINOBON_API_KEY / SINOBON_SECRET_KEY in an env file (never in the repo;
+    --env, when not given, reads shioaji.env out of ~/.claude/stock-band.json
+    or --project's stock-band.json (project wins), falling back to
+    ~/.sinobon.env when neither sets it - see read_config_shioaji_env())
+  * shioaji installed on Python 3.10-3.13 (3.12/3.13 is what SinoPac tests
+    against) - `--check` verifies all of this, including a real login
 """
+from __future__ import annotations  # defers `X | None` annotations so --check's own probe of "is this Python new enough" can run first, even on Python 3.9
+
 import argparse
 import json
 import os
@@ -59,6 +85,26 @@ INDICES = [
 # UTC+8 all year, so one subtraction fixes it - and it has to be fixed here,
 # because the band prints this as 更新.
 TAIPEI_OFFSET_MS = 8 * 3600 * 1000
+
+
+RUNTIME_DIR_ROOT = ".claude/stock-band"
+
+
+def runtime_dir(home: str, project: str) -> Path:
+    """
+    Same rule as hooks/register.tsx's runtimeDir(): RUNTIME_DIR_ROOT plus the
+    project path with its leading "/" dropped and every remaining "/" turned
+    into "-" (e.g. `/Users/x/app` -> `Users-x-app`). `project` must already
+    be the same normalized absolute string register.tsx would compute (see
+    main()'s use of this) - a symlink-resolved or otherwise reshaped string
+    here would land manual runs and the band in two different directories.
+    `home` falls back to the project's own `.claude/` only when $HOME is
+    unset, matching the TS side.
+    """
+    if not home:
+        return Path(project) / ".claude"
+    slug = project.lstrip("/").replace("/", "-")
+    return Path(home) / RUNTIME_DIR_ROOT / slug
 
 
 def load_env(path: Path) -> None:
@@ -87,6 +133,28 @@ def read_watchlist(config_path: Path) -> list[dict]:
         if code:
             out.append({"code": code, "name": row.get("name") or code})
     return out
+
+
+def read_config_shioaji_env(*config_paths: Path) -> str | None:
+    """`shioaji.env` out of one or more stock-band.json files, same merge
+    order as register.tsx's poll() (user-level file first, project file
+    second - a later path's value wins). Returns None when neither config
+    sets it, so the caller falls back to the shared ~/.sinobon.env default -
+    this is what keeps `--check` (and a by-hand run with no --env) agreeing
+    with whatever path the band itself would actually spawn this script
+    with, instead of a fixed default no real project uses."""
+    env_value: str | None = None
+    for config_path in config_paths:
+        if not config_path.exists():
+            continue
+        try:
+            root = json.loads(config_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        shioaji = root.get("shioaji") if isinstance(root, dict) else None
+        if isinstance(shioaji, dict) and shioaji.get("env"):
+            env_value = str(shioaji["env"])
+    return env_value
 
 
 def field(obj, name, default=None):
@@ -277,20 +345,162 @@ def fetch_positions(api) -> list:
     return api.list_positions(api.stock_account, unit=sj.constant.Unit.Share) or []
 
 
+def check_python_version() -> bool:
+    major, minor = sys.version_info[:2]
+    version = f"{major}.{minor}"
+    if (major, minor) > (3, 13):
+        print(f"❌ Python 版本 {version}：shioaji 不支援這個版本，請用 3.12 或 3.13 的 venv")
+        return False
+    if (major, minor) < (3, 10):
+        print(f"❌ Python 版本 {version}：shioaji 需要 3.10-3.13")
+        return False
+    print(f"✅ Python 版本 {version}（shioaji 支援 3.10-3.13）")
+    return True
+
+
+def check_import_shioaji() -> bool:
+    try:
+        import shioaji  # noqa: F401
+    except ImportError as err:
+        print(f"❌ import shioaji 失敗（{err}），跑 pip install shioaji")
+        return False
+    print("✅ import shioaji 成功")
+    return True
+
+
+def check_env_file(env_path: Path) -> tuple[bool, dict]:
+    """Returns (兩把 key 都有值, 讀到的值) - the values are used only to try a
+    login below and are never printed."""
+    if not env_path.exists():
+        print(f"❌ env 檔不存在：{env_path}")
+        return False, {}
+    print(f"✅ env 檔存在：{env_path}")
+    values: dict[str, str] = {}
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+    ok = True
+    for key in ("SINOBON_API_KEY", "SINOBON_SECRET_KEY"):
+        has_value = bool(values.get(key))
+        print(f"{'✅' if has_value else '❌'} {key} 有值" if has_value else f"❌ {key} 沒有值")
+        ok = ok and has_value
+    return ok, values
+
+
+def check_login(values: dict, shioaji_ok: bool) -> bool:
+    if not shioaji_ok:
+        print("❌ 登入略過（shioaji 沒裝好，見上）")
+        return False
+    if not values.get("SINOBON_API_KEY") or not values.get("SINOBON_SECRET_KEY"):
+        print("❌ 登入略過（env 檔缺 key，見上）")
+        return False
+    import shioaji as sj
+
+    try:
+        api = sj.Shioaji()
+        api.login(
+            api_key=values["SINOBON_API_KEY"],
+            secret_key=values["SINOBON_SECRET_KEY"],
+            subscribe_trade=False,
+        )
+    except Exception as err:  # noqa: BLE001 - surfacing whatever shioaji raised is the point of --check
+        message = str(err)
+        if "406" in message:
+            print("❌ 登入失敗（HTTP 406）：簽署中心的 Python API 測試沒通過，去永豐簽署中心完成測試")
+        else:
+            print(f"❌ 登入失敗：{type(err).__name__}: {message}")
+        return False
+    print("✅ 登入成功")
+    try:
+        api.logout()
+    except Exception:  # noqa: BLE001 - logout failing after a successful check changes nothing
+        pass
+    return True
+
+
+def check_platform() -> bool:
+    if sys.platform == "win32":
+        print("❌ 永豐路線只支援 macOS／Linux（band 用 nohup 啟動）")
+        return False
+    print(f"✅ 平台 {sys.platform}")
+    return True
+
+
+def run_check(args) -> bool:
+    """--check: print each diagnostic line, write nothing, never touch --codes."""
+    print("== 永豐 Shioaji 診斷 ==")
+    ok_version = check_python_version()
+    ok_import = check_import_shioaji()
+    ok_env, values = check_env_file(Path(args.env).expanduser())
+    ok_login = check_login(values, ok_import)
+    ok_platform = check_platform()
+    return ok_version and ok_import and ok_env and ok_login and ok_platform
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--project", default=os.getcwd(), help="the project whose .claude/ holds the band's files")
-    parser.add_argument("--env", default="~/.sinobon.env", help="file holding SINOBON_API_KEY / SINOBON_SECRET_KEY")
+    parser.add_argument("--project", default=os.getcwd(), help="the project whose .claude/stock-band.json holds the `tw` watchlist; also, when --out-dir is unset, what the runtime-dir slug is built from")
+    parser.add_argument("--out-dir", default="", help="where stock-quotes.json / stock-holdings.json go; default is the same runtime dir hooks/register.tsx computes for --project. The heartbeat/pid still go wherever --heartbeat/--pidfile say (empty = off), same as always")
+    parser.add_argument(
+        "--env",
+        default=None,
+        help="file holding SINOBON_API_KEY / SINOBON_SECRET_KEY; defaults to whatever "
+        "shioaji.env ~/.claude/stock-band.json or --project's stock-band.json sets "
+        "(project wins), falling back to ~/.sinobon.env when neither sets it",
+    )
     parser.add_argument("--interval", type=float, default=10, help="seconds between snapshots; 0 writes once and exits")
     parser.add_argument("--codes", default="", help="comma-separated codes, overriding the band's own watchlist")
     parser.add_argument("--heartbeat", default="", help="path the band keeps rewriting while it wants this route; missing or >90s old exits this process (empty disables the check, for a by-hand run)")
     parser.add_argument("--pidfile", default="", help="path holding this fetcher's pid; a live pid already there exits this run at once instead of double-fetching the same project")
+    parser.add_argument("--check", action="store_true", help="diagnose the environment (Python version, shioaji install, env file, a real login, platform) and exit; writes nothing, needs no --codes")
     args = parser.parse_args()
 
-    project = Path(args.project).expanduser().resolve()
-    out_path = project / ".claude" / "stock-quotes.json"
-    holdings_path = project / ".claude" / "stock-holdings.json"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    # Not `.resolve()`: that would follow symlinks and could reshape this
+    # string differently than $.session.cwd() does on the TS side, landing a
+    # manual run's files in a directory the band never looks at. abspath only
+    # normalizes "." / ".." / a trailing slash, same as Node's path.resolve.
+    project_str = os.path.abspath(os.path.expanduser(args.project))
+    project = Path(project_str)
+    home = os.environ.get("HOME", "")
+
+    # --env not given: read the same shioaji.env the band itself would spawn
+    # this script with (user-level file, then project file - project wins),
+    # before falling back to the shared ~/.sinobon.env default. Keeps a
+    # by-hand run and `--check` honest about the env file a real spawn uses,
+    # instead of a fixed default that no project with a custom path matches.
+    if args.env is None:
+        config_paths = [project / ".claude" / "stock-band.json"]
+        if home:
+            config_paths.insert(0, Path(home) / ".claude" / "stock-band.json")
+        args.env = read_config_shioaji_env(*config_paths) or "~/.sinobon.env"
+
+    # Resolve every path arg against the caller's cwd now, before the chdir
+    # below reshapes what "relative" means - otherwise a relative --env /
+    # --heartbeat / --pidfile would start resolving against out_dir instead
+    # of wherever the caller actually meant.
+    args.env = os.path.abspath(os.path.expanduser(args.env))
+    if args.heartbeat:
+        args.heartbeat = os.path.abspath(os.path.expanduser(args.heartbeat))
+    if args.pidfile:
+        args.pidfile = os.path.abspath(os.path.expanduser(args.pidfile))
+
+    out_dir = Path(args.out_dir).expanduser().resolve() if args.out_dir else runtime_dir(home, project_str)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # Shioaji writes its own shioaji.log into whatever directory the process
+    # runs from - there is no config knob to point it elsewhere - so this
+    # must chdir into out_dir before shioaji is imported anywhere below,
+    # --check included, or that log lands in the caller's repo instead of
+    # next to our own output files.
+    os.chdir(out_dir)
+
+    if args.check:
+        sys.exit(0 if run_check(args) else 1)
+
+    out_path = out_dir / "stock-quotes.json"
+    holdings_path = out_dir / "stock-holdings.json"
 
     pidfile = Path(args.pidfile).expanduser().resolve() if args.pidfile else None
     if pidfile and not claim_pidfile(pidfile):

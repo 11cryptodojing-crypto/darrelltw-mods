@@ -19,9 +19,15 @@ import type { Register } from 'claude-code'
 // market the feed cannot reach at all falls back to a
 // deterministic sine walk off each symbol's previous close, and the footer
 // then says 示範資料 rather than pretending.
-// `.claude/stock-quotes.json` stays as the override seam (see
-// stock-band.example.json and docs/stock-api-notes.md): a fresh file wins over
-// the feed, which is how another fetcher can take the band over.
+// Machine-written quotes and holdings live under the user's home directory
+// now (see runtimeDir below), never in the project's `.claude/`. Quotes read
+// order: the runtime-dir file while it is fresh (<120s), then the project's
+// `.claude/stock-quotes.json` - which stays as the override seam (see
+// stock-band.example.json and docs/stock-api-notes.md) for a hand-edited
+// snapshot or another fetcher to take the band over - then the built-in
+// feed. Holdings follow the same order, except the runtime-dir file never
+// expires (see parseHoldingsFile): a position does not go stale just
+// because nobody wrote a fresh copy recently.
 //
 // Never name a local variable `h`: every JSX tag in this file compiles to h(...).
 
@@ -33,6 +39,23 @@ const HOLDINGS_PATH = '.claude/stock-holdings.json'
 // a shared project's stock-band.json stays neutral. `~` is resolved with
 // $.env.get("HOME") at poll time, since a path constant cannot expand it.
 const USER_CONFIG_REL = '.claude/stock-band.json'
+
+// Everything the module or the Shioaji fetcher writes at runtime - quotes,
+// holdings, the heartbeat, the fetcher's log and its PID file - lives under
+// this directory instead of the project's `.claude/`, so a shared project
+// never picks up one person's live prices or PID file. One directory per
+// project avoids collisions: RUNTIME_DIR_ROOT plus the project path with
+// its leading "/" dropped and every remaining "/" turned into "-" (e.g.
+// `/Users/x/app` -> `Users-x-app`). `home` falls back to the project's own
+// `.claude/` only when $HOME is unset, matching how this module wrote its
+// runtime files before runtimeDir existed.
+const RUNTIME_DIR_ROOT = '.claude/stock-band'
+function runtimeDir(home: string, project: string): string {
+  if (!home) return `${project}/.claude/`
+  const slug = project.replace(/^\/+/, '').replace(/\//g, '-')
+  return `${home}/${RUNTIME_DIR_ROOT}/${slug}/`
+}
+
 const DEFAULT_REFRESH_MS = 3000
 const QUOTE_STALE_MS = 120_000
 const SNOOZE_MS = 30 * 60 * 1000
@@ -716,9 +739,10 @@ function parseTwSources(root: Record<string, unknown>, fallback: TwSourceName[])
 }
 
 /**
- * The shared body behind `parseConfig` (one JSON text) and the merged root
- * `poll()` builds from the user-level and project files (see USER_CONFIG_REL
- * and CONFIG_PATH) - `parseConfig` is `parseConfigRoot(parseJsonRecord(text))`.
+ * Turns one parsed config root (a user-level file, a project file, or the
+ * merged root `poll()` builds from both - see USER_CONFIG_REL and
+ * CONFIG_PATH) into a `Config`, filling in `defaultConfig()` for every key
+ * the root does not set.
  */
 function parseConfigRoot(root: Record<string, unknown> | undefined): Config {
   const cfg = defaultConfig()
@@ -756,10 +780,6 @@ function parseConfigRoot(root: Record<string, unknown> | undefined): Config {
   }
   if (root.holdingsSource === 'config') cfg.holdingsSource = 'config'
   return cfg
-}
-
-function parseConfig(text: string | undefined): Config {
-  return parseConfigRoot(parseJsonRecord(text))
 }
 
 /**
@@ -866,9 +886,10 @@ function parseBars(value: unknown): Bar[] | undefined {
   return out.length > 0 ? out : undefined
 }
 
-// `.claude/stock-quotes.json` is the seam a real feed writes; see
-// stock-band.example.json for the shape. Anything stale or malformed is
-// ignored and the band falls back to demo prices.
+// Parses a `stock-quotes.json` file's text, whichever of the two locations
+// it came from (runtime-dir or the project's `.claude/`, see runtimeDir and
+// the header comment); see stock-band.example.json for the shape. Anything
+// stale or malformed is ignored and the band falls back to demo prices.
 function parseQuotes(text: string | undefined, now: number): QuotesFile | undefined {
   if (!text) return undefined
   let root: Record<string, unknown> | undefined
@@ -925,7 +946,7 @@ function parseQuotes(text: string | undefined, now: number): QuotesFile | undefi
   }
 }
 
-// --- holdings file (.claude/stock-holdings.json) ----------------------------
+// --- holdings file (stock-holdings.json, runtime-dir or project .claude/) --
 type HoldingsFile = {
   asOf: number
   market?: MarketId
@@ -934,12 +955,26 @@ type HoldingsFile = {
 }
 
 /**
- * `.claude/stock-holdings.json` - positions the 損益 view prices, written by
- * the Shioaji fetcher every tick (after `list_positions`) or by hand. Unlike
- * the quotes file this is never treated as stale: a position does not go
- * wrong just because nobody wrote a fresh copy in the last two minutes, so
- * QUOTE_STALE_MS does not apply here. `asOf` still travels through, so the
- * board can print when the snapshot was taken.
+ * `stock-holdings.json` - positions the 損益 view prices, written by the
+ * Shioaji fetcher every tick (after `list_positions`) into the runtime dir,
+ * or by hand into the project's `.claude/` (see runtimeDir and the header
+ * comment for the read order between the two). Unlike the quotes file this
+ * is never treated as stale: a position does not go wrong just because
+ * nobody wrote a fresh copy in the last two minutes, so QUOTE_STALE_MS does
+ * not apply here. `asOf` still travels through, so the board can print when
+ * the snapshot was taken.
+ *
+ * That "never stale" rule is exactly why a legacy project-path file is
+ * dangerous: before runtimeDir existed, `fetch-quotes-shioaji.py` wrote
+ * straight into `<project>/.claude/stock-holdings.json`, always stamped
+ * `"source": "永豐 庫存"` (see the script's `list_positions` output). A copy
+ * left behind after upgrading to the runtime-dir version would otherwise
+ * read as a permanent manual override and never go away on its own. The
+ * project-path caller (see the `poll` loop in `session.start`) treats that
+ * exact source string at that exact path as the legacy fetcher's leftovers
+ * and discards it instead of trusting it - the runtime-dir file is never
+ * filtered this way, and nothing else is expected to write that label at
+ * the project path (see stock-holdings.example.json and the README).
  */
 function parseHoldingsFile(text: string | undefined): HoldingsFile | undefined {
   if (!text) return undefined
@@ -1452,11 +1487,26 @@ function buildProps(
 // file); ui.render builds the props from it on every draw, so a button press
 // changes the view on the same frame instead of waiting out a refresh tick.
 let ready = false
-let lastFile: QuotesFile | undefined // .claude/stock-quotes.json, while it is fresh
-let lastHoldingsFile: HoldingsFile | undefined // .claude/stock-holdings.json; never expired, see parseHoldingsFile
+let lastFile: QuotesFile | undefined // runtime-dir file (fresh) or project override file
+let lastHoldingsFile: HoldingsFile | undefined // runtime-dir or project holdings; never expired, see parseHoldingsFile
+// true once the 0.9-legacy-holdings-file warning has been logged this
+// session, so a file left behind at the project path is reported once
+// instead of on every poll tick (see the poll loop's use of it below)
+let loggedLegacyProjectHoldings = false
+// whether the runtime-dir quotes file specifically (not the project
+// override) is fresh - feedTwShioaji's own health signal, set every poll
+let runtimeQuotesFresh = false
 // when spawnShioaji last ran, so it is never re-run more than once a minute
 // (see spawnShioaji's own comment for the full respawn rule)
 let lastShioajiSpawn = 0
+// true once this session has logged the "shioaji isn't pricing anything"
+// warning - logged at most once per session, see feedTwShioaji
+let shioajiWarned = false
+// when this session FIRST saw a pidfile it did not itself spawn (a prior
+// session's leftover, or a fetcher already running before this session
+// polled) - gives that discovery its own 60s grace clock instead of
+// treating it as having been alive since forever, see feedTwShioaji
+let shioajiPidSeenAt = 0
 // the feed's last good snapshot per market, with the one before it for the
 // turn. Keyed by market because a snapshot must never reach the other board:
 // US prices under 加權指數 would be worse than no prices at all.
@@ -1741,6 +1791,10 @@ export const register: Register = on => {
     // resolved once per session: `~` in a config path only ever means this
     const home = (await $.env.get('HOME')) ?? ''
     const userConfigPath = home ? `${home}/${USER_CONFIG_REL}` : ''
+    // Resolved once per session, same as userConfigPath: every runtime file
+    // this module or the Shioaji fetcher writes lives under `runtime`.
+    const project = await $.session.cwd()
+    const runtime = runtimeDir(home, project)
 
     // Both files are optional and most sessions have neither, but the host logs
     // every failed $.fs.read at ERROR level - so polling them every few seconds
@@ -1777,13 +1831,38 @@ export const register: Register = on => {
       const projectConfigText = await readOptional(CONFIG_PATH)
       const userRoot = parseJsonRecord(userConfigText)
       const projectRoot = parseJsonRecord(projectConfigText)
-      const mergedRoot = userRoot || projectRoot ? { ...(userRoot ?? {}), ...(projectRoot ?? {}) } : undefined
-      const quotesText = await readOptional(QUOTES_PATH)
-      const holdingsText = await readOptional(HOLDINGS_PATH)
+      const mergedRoot = userRoot || projectRoot ? { ...userRoot, ...projectRoot } : undefined
+      // Quotes: the runtime-dir file (the Shioaji fetcher's own output)
+      // wins while fresh, then the project's file as the manual override
+      // seam, then nothing (the built-in feed takes over). Holdings follow
+      // the same order, but the runtime-dir file wins outright whenever it
+      // parses - see parseHoldingsFile for why it never goes stale.
+      const runtimeQuotesText = await readOptional(`${runtime}stock-quotes.json`)
+      const projectQuotesText = await readOptional(QUOTES_PATH)
+      const runtimeHoldingsText = await readOptional(`${runtime}stock-holdings.json`)
+      const projectHoldingsText = await readOptional(HOLDINGS_PATH)
 
       config = parseConfigRoot(mergedRoot)
-      lastFile = parseQuotes(quotesText, now)
-      lastHoldingsFile = parseHoldingsFile(holdingsText)
+      const runtimeQuotes = parseQuotes(runtimeQuotesText, now)
+      runtimeQuotesFresh = runtimeQuotes !== undefined
+      lastFile = runtimeQuotes ?? parseQuotes(projectQuotesText, now)
+      // The project-path holdings file only: a 0.9-era Shioaji fetcher wrote
+      // its output straight here (before runtimeDir existed) and always
+      // stamped it "永豐 庫存" - see parseHoldingsFile's docblock. That file
+      // never expires, so a leftover copy would otherwise read as a
+      // permanent manual override forever after the upgrade. Filter it out
+      // and warn once; the runtime-dir file is never filtered this way.
+      let projectHoldings = parseHoldingsFile(projectHoldingsText)
+      if (projectHoldings?.source === '永豐 庫存') {
+        projectHoldings = undefined
+        if (!loggedLegacyProjectHoldings) {
+          loggedLegacyProjectHoldings = true
+          $.ui.log(
+            `tw-stock-mod: ${project}/${HOLDINGS_PATH} 是 0.9 版留下的永豐輸出，已忽略，可以刪掉；新版寫在 ${runtime}stock-holdings.json`,
+          )
+        }
+      }
+      lastHoldingsFile = parseHoldingsFile(runtimeHoldingsText) ?? projectHoldings
       ready = true
       autoPage(now)
       // redraw while snoozed too, so the collapsed row's countdown ticks down
@@ -2003,11 +2082,16 @@ export const register: Register = on => {
      * `"shioaji"` in `twSources`: spawn (or re-check) the fetcher script
      * rather than call an HTTP endpoint - see the ShioajiConfig doc comment
      * for why this cannot run inside the hooks module directly. Returns
-     * whether the override quotes file is fresh (true = this tick is
+     * whether the runtime-dir quotes file is fresh (true = this tick is
      * covered, same convention as feedTwYahoo/feedTwMis): the script writes
-     * QUOTES_PATH asynchronously, on its own schedule, so "did shioaji
-     * price Taiwan just now" can only ever mean "is the file it wrote still
-     * fresh", never "did a request this module made just now succeed".
+     * that file asynchronously, on its own schedule, so "did shioaji price
+     * Taiwan just now" can only ever mean "is the file it wrote still
+     * fresh", never "did a request this module made just now succeed". This
+     * checks the runtime-dir file specifically, never the project's
+     * `.claude/stock-quotes.json` override - that file can stay fresh for
+     * reasons that have nothing to do with shioaji, and must never mask a
+     * dead fetcher from either this respawn check or the visible-failure
+     * warning below.
      *
      * Respawn rule: once at session start (the first feed tick), then only
      * when the quotes file has gone stale (>120s, i.e. no script is feeding
@@ -2016,8 +2100,7 @@ export const register: Register = on => {
      * itself, and a script that died is retried at most once a minute.
      */
     const feedTwShioaji = async (now: number): Promise<boolean> => {
-      const project = await $.session.cwd()
-      const heartbeatPath = `${project}/.claude/stock-band.heartbeat`
+      const heartbeatPath = `${runtime}stock-band.heartbeat`
       // Written every tick the Shioaji route is wanted, whether or not this
       // call ends up spawning - it is the signal the script watches: it
       // exits by itself once the heartbeat is older than 90s (band closed,
@@ -2028,18 +2111,53 @@ export const register: Register = on => {
       } catch (err) {
         $.ui.log(`tw-stock-mod: could not write the shioaji heartbeat: ${err}`)
       }
-      const stale = !lastFile || now - lastFile.asOf > QUOTE_STALE_MS
+
+      const expand = (p: string) => (home && p.startsWith('~') ? home + p.slice(1) : p)
+      const python = expand(config.shioaji.python)
+      const env = expand(config.shioaji.env)
+      const script = `${$.plugin.root}/scripts/fetch-quotes-shioaji.py`
+      const logPath = `${runtime}stock-shioaji.log`
+      const pidPath = `${runtime}stock-shioaji.pid`
+
+      // Visible failure: a script that spawned (or is already running, per
+      // its own pidfile) but still has not produced a fresh runtime-dir
+      // quotes file 60s later is a failure the session should hear about
+      // once, not a silent fallthrough to the next configured source.
+      if (!shioajiWarned && !runtimeQuotesFresh) {
+        let alive = lastShioajiSpawn > 0
+        if (!alive) {
+          try {
+            await $.fs.read(pidPath)
+            alive = true
+            if (!shioajiPidSeenAt) shioajiPidSeenAt = now
+          } catch {
+            alive = false
+            shioajiPidSeenAt = 0
+          }
+        }
+        // Own spawn: age from when this session actually launched it. A
+        // pidfile this session did not spawn (shioajiPidSeenAt): age from
+        // first discovery, not from now-lastShioajiSpawn (0 => Infinity),
+        // so a leftover pidfile gets the same 60s grace as a fresh spawn
+        // instead of warning on the very first tick.
+        const spawnAge = lastShioajiSpawn
+          ? now - lastShioajiSpawn
+          : shioajiPidSeenAt
+            ? now - shioajiPidSeenAt
+            : Infinity
+        if (alive && spawnAge >= 60_000) {
+          shioajiWarned = true
+          $.ui.log(
+            `tw-stock-mod: 永豐路線沒有出價，退回下一個來源。看 ${logPath}，或跑 ${python} ${script} --check 找原因`,
+          )
+        }
+      }
+
+      const stale = !runtimeQuotesFresh
       if (!stale) return true
 
       if (!lastShioajiSpawn || now - lastShioajiSpawn >= 60_000) {
         lastShioajiSpawn = now
-        const home = await $.env.get('HOME')
-        const expand = (p: string) => (home && p.startsWith('~') ? home + p.slice(1) : p)
-        const python = expand(config.shioaji.python)
-        const env = expand(config.shioaji.env)
-        const script = `${$.plugin.root}/scripts/fetch-quotes-shioaji.py`
-        const logPath = `${project}/.claude/stock-shioaji.log`
-        const pidPath = `${project}/.claude/stock-shioaji.pid`
         try {
           // `nohup ... >>log 2>&1 &`, wrapped in `/bin/sh -c`, is what lets
           // $.process.run resolve at all: run() is one-shot and waits for
@@ -2078,6 +2196,8 @@ export const register: Register = on => {
               script,
               '--project',
               project,
+              '--out-dir',
+              runtime,
               '--env',
               env,
               '--interval',
@@ -2099,12 +2219,12 @@ export const register: Register = on => {
       }
 
       // A missing python, a missing env file, or a dead login all show up
-      // the same way from here: the quotes file stays stale. Falling
-      // through to the next configured source (feedTw below) rather than
-      // waiting out QUOTE_STALE_MS is what keeps the band off demo prices
-      // in the meantime - a fresh quotes file, once the script does log in,
-      // wins over whatever that fallback publishes on the very next poll
-      // (quotesFor prefers `lastFile` first).
+      // the same way from here: the runtime-dir quotes file stays stale.
+      // Falling through to the next configured source (feedTw below) rather
+      // than waiting out QUOTE_STALE_MS is what keeps the band off demo
+      // prices in the meantime - a fresh runtime-dir file, once the script
+      // does log in, wins over whatever that fallback publishes on the very
+      // next poll (quotesFor prefers `lastFile` first).
       return false
     }
 

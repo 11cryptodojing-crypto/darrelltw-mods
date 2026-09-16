@@ -9,9 +9,16 @@ const projDir = cfgPath
 const handlers = new Map(); const timers = []
 const $ = {
   clock: { now: async () => Date.now(), every: (ms, fn) => timers.push(fn) },
-  fs: { read: async p => readFile(new URL('file://' + projDir + '/' + p)).then(b => b.toString()) },
+  // register.tsx reads two kinds of paths: project-relative overrides
+  // (e.g. '.claude/stock-quotes.json', joined onto projDir below) and
+  // absolute runtime-dir paths (e.g. `${home}/.claude/stock-band/<slug>/...`,
+  // already rooted - joining projDir onto those would nest them under
+  // projDir and always 404). An absolute `p` is read as-is.
+  fs: { read: async p => readFile(p.startsWith('/') ? p : `${projDir}/${p}`).then(b => b.toString()) },
   ui: { log: () => {}, invalidate: () => {}, resolve: async () => ({ Box: 'Box', Button: 'Button', Client: 'Client' }) },
   http: { fetch: async (url, init) => { const r = await fetch(url, { headers: init?.headers }); return { ok: r.ok, status: r.status, text: await r.text() } } },
+  env: { get: async name => (name === 'HOME' ? process.env.HOME : undefined) },
+  session: { cwd: async () => projDir },
 }
 const { register } = await import(regPath)
 register((e, a, b) => handlers.set(e, typeof a === 'function' ? a : b))
@@ -33,6 +40,7 @@ const surface = {
   get state() { return state },
   setState: s => { state = s },
   every: () => () => {},
+  onPointer: () => {},
 }
 board(props, surface) // first call seeds state
 const out = board(props, surface)

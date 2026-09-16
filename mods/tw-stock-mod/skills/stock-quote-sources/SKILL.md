@@ -44,24 +44,29 @@ project's - see the note above) to:
 ```
 
 The band spawns `scripts/fetch-quotes-shioaji.py` itself once Taiwan needs a
-feed, and keeps it fed with a heartbeat file — nothing to run by hand, nothing
-to leave a terminal open for. `python` can point at a project's own venv
-(e.g. `~/.venvs/shioaji/bin/python3`) if the system `python3` does
-not have `shioaji` installed. Footer tag: `永豐 即時`. The same script also
-writes `<project>/.claude/stock-holdings.json` every tick (from
-`list_positions`), which is what feeds the 損益 view.
+feed, and keeps it fed with a heartbeat file (all in the runtime dir,
+`~/.claude/stock-band/<project-slug>/`, never the project's `.claude/`) —
+nothing to run by hand, nothing to leave a terminal open for. `python` can
+point at a venv's own interpreter (e.g. `~/some/venv/.venv/bin/python3`) if
+the system `python3` does not have `shioaji` installed. Footer tag: `永豐
+即時`. The same script also writes `stock-holdings.json` (runtime dir) every
+tick (from `list_positions`), which is what feeds the 損益 view. First run
+`<python> scripts/fetch-quotes-shioaji.py --check` to confirm the account,
+env file and login all work before wiring it in.
 
 **永豐 Shioaji, run by hand.** Same script, started yourself instead of by the
 band — useful outside a Claude Code session, or to debug the feed:
 
 ```sh
-~/.venvs/shioaji/bin/python3 \
+python3 \
   mods/tw-stock-mod/scripts/fetch-quotes-shioaji.py \
-  --env ~/.sinobon.env --project . --interval 10
+  --project . --interval 10
 ```
 
-Leave it running — it holds a login session and writes
-`<project>/.claude/stock-quotes.json` (and `stock-holdings.json`) on a loop.
+(use whichever `python` has `shioaji` installed; `--env` defaults to
+`~/.sinobon.env`). Leave it running — it holds a login session and writes
+`stock-quotes.json` (and `stock-holdings.json`) into the same runtime dir on
+a loop, unless `--out-dir` points somewhere else.
 
 **富果 Fugle, or any other vendor.** Not wired into the module. Write a small
 script that calls the vendor's API and writes
