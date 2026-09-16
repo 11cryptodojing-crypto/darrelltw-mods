@@ -1659,7 +1659,12 @@ export const register: Register = on => {
     // The market button carries the market name ON THE BAND and nothing else:
     // 台股 ▾ / 美股 ▾. It tracks the clock until the first press, then toggles.
     const open = props.phase === 'open'
+    // Two views, two names, so every line in the button row below can read
+    // forwards: `table ? 元素 : null` and `chart ? 元素 : null`, never
+    // `chart ? null : 元素`, which says what does NOT draw and has to be
+    // reversed in the head before it says anything.
     const chart = props.view === 'chart'
+    const table = !chart
     const marketLabel = marketButtonLabel(props.marketLabel)
     // 09:30-16:00 ET answers the wrong question in Taipei, so taipeiNote
     // restates it in local time - but only if it still fits: there is no way
@@ -1670,7 +1675,7 @@ export const register: Register = on => {
       dispWidth(marketLabel) + 1 + dispWidth(`${open ? SUN : MOON} ${open ? '盤中' : '休市'}`) + 1 +
       dispWidth(props.sessionNote)
     const showTaipei =
-      !chart &&
+      table &&
       props.taipeiNote !== '' &&
       leftCoreWidth + 1 + dispWidth(props.taipeiNote) + RIGHT_BUTTON_GROUP_COLS <= cols
 
@@ -1695,24 +1700,24 @@ export const register: Register = on => {
               <Button key="stock-band:next" label={`下一檔 ▶ ${focus + 1}/${rowCount}`} onPress={onNext} />
             ) : null}
             {chart ? <Button key="stock-band:list" label="回清單" onPress={onList} /> : null}
-            {chart ? null : <Text> </Text>}
-            {chart ? null : (
+            {table ? <Text> </Text> : null}
+            {table ? (
               <Text color={open ? ORANGE : MOON_BLUE}>{`${open ? SUN : MOON} ${open ? '盤中' : '休市'}`}</Text>
-            )}
-            {chart ? null : <Text> </Text>}
-            {chart ? null : <Text color={DIM}>{props.sessionNote}</Text>}
+            ) : null}
+            {table ? <Text> </Text> : null}
+            {table ? <Text color={DIM}>{props.sessionNote}</Text> : null}
             {showTaipei ? <Text> </Text> : null}
             {showTaipei ? <Text color={DIM}>{props.taipeiNote}</Text> : null}
           </Box>
           <Box flexDirection="row">
-            {props.pageCount > 1 && !chart ? (
+            {table && props.pageCount > 1 ? (
               <Button
                 key="stock-band:page"
                 label={`翻頁 ${props.page + 1}/${props.pageCount}`}
                 onPress={onPage}
               />
             ) : null}
-            {chart ? null : <Button key="stock-band:trend" label="趨勢圖" onPress={onTrend} />}
+            {table ? <Button key="stock-band:trend" label="趨勢圖" onPress={onTrend} /> : null}
             <Button key="stock-band:snooze" label="收起 30分" onPress={onSnooze} />
           </Box>
         </Box>
