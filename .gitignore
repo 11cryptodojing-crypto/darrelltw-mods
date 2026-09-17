@@ -17,3 +17,7 @@ shioaji.log
 
 # local demo holdings render into these design mockups; demo numbers stay out of git
 mods/tw-stock-mod/prototype/pnl-styles/
+
+# internal working notes and plans stay local
+task-tracker.md
+docs/plan-*.md
