@@ -1371,9 +1371,14 @@ function buildProps(
   // change, so rewriting it on every render costs nothing
   lastShown = shown
 
-  // K bars are demo-only for the one symbol the chart view is showing: a
-  // whole page of chart-length bars would be hundreds of numbers crossing
-  // into the board every refresh for nothing.
+  // Only the one symbol the chart view is showing gets bars at all: a whole
+  // page of chart-length bars would be hundreds of numbers crossing into the
+  // board every refresh for nothing. demoBars fills that in only for the demo
+  // walk (no quotes file, no live snapshot). A quotes file (永豐, 證交所)
+  // never carries its own candles, but quotesFor layers in whatever Yahoo has
+  // fetched for the focused symbol (see withLiveBars) the same way the
+  // built-in feed already does - until that fetch lands, the chart shows no
+  // bars yet rather than a demo-walk stand-in for a real price.
   const focusIdx = Math.max(0, Math.min(shown.length - 1, focus))
   if (view === 'chart' && shown.length > 0) {
     const q = shown[focusIdx]
@@ -1662,6 +1667,39 @@ function marketNeedsFeed(now: number, market: MarketId): boolean {
   return !snap || snap.file.asOf < lastCloseAt(now, market)
 }
 
+/** the badge a Yahoo-sourced bar set gets when the quotes file itself names none */
+const YAHOO_BAR_LABEL = '5 分 K（Yahoo）'
+
+// Neither a 永豐 report nor a 證交所/MIS snapshot carries candles, so a quotes
+// file's own entries never have `bars` - feedBars (fetched per focused
+// symbol, always from Yahoo) is the only source for either market's K-bar
+// view. This layers that cache under a market's quotes: an entry that
+// already has bars (the built-in feed's own snapshot, once one exists) keeps
+// them, and only a gap gets the Yahoo set, and only while it is still within
+// BARS_STALE_MS.
+function withLiveBars(
+  market: MarketId,
+  quotes: Record<string, FileQuote>,
+  now: number,
+): { quotes: Record<string, FileQuote>; barsFromYahoo: boolean } {
+  let barsFromYahoo = false
+  const out: Record<string, FileQuote> = {}
+  for (const [code, quote] of Object.entries(quotes)) {
+    if (quote.bars) {
+      out[code] = quote
+      continue
+    }
+    const bars = liveBars[`${market}:${code}`]
+    if (bars && now - bars.at <= BARS_STALE_MS) {
+      out[code] = { ...quote, bars: bars.bars }
+      barsFromYahoo = true
+    } else {
+      out[code] = quote
+    }
+  }
+  return { quotes: out, barsFromYahoo }
+}
+
 // The quotes file wins over the feed: it is the explicit override. A market
 // with no snapshot falls back to the demo walk, which is what the footer's
 // 示範資料 tag is for.
@@ -1679,16 +1717,17 @@ function quotesFor(market: MarketId, now: number): QuotesFile | undefined {
     // always win over the bridge's.
     const bridge = liveBy[market]
     const bridgeHolds = bridge && snapshotHolds(bridge.file.asOf, now, market)
-    if (!bridgeHolds) return lastFile
-    return { ...lastFile, quotes: { ...bridge.file.quotes, ...lastFile.quotes } }
+    const merged = bridgeHolds ? { ...bridge.file.quotes, ...lastFile.quotes } : lastFile.quotes
+    const { quotes, barsFromYahoo } = withLiveBars(market, merged, now)
+    return {
+      ...lastFile,
+      quotes,
+      ...(barsFromYahoo && !lastFile.barLabel ? { barLabel: YAHOO_BAR_LABEL } : {}),
+    }
   }
   const snap = liveBy[market]
   if (!snap || !snapshotHolds(snap.file.asOf, now, market)) return undefined
-  const quotes: Record<string, FileQuote> = {}
-  for (const [code, quote] of Object.entries(snap.file.quotes)) {
-    const bars = liveBars[`${market}:${code}`]
-    quotes[code] = bars && now - bars.at <= BARS_STALE_MS ? { ...quote, bars: bars.bars } : quote
-  }
+  const { quotes } = withLiveBars(market, snap.file.quotes, now)
   return { ...snap.file, quotes, ...(snap.prev ? { prev: snap.prev } : {}) }
 }
 
@@ -2349,8 +2388,11 @@ export const register: Register = on => {
     const props = buildProps(now, config, quotesFor(pickMarket(now, mode).market, now), mode, view, focus)
 
     // the trend view is the only thing that needs K bars, so it is the only
-    // thing that asks for them; feedBars drops a request it already answered
-    if (view === 'chart' && props.source === 'live' && props.quotes[props.focus]) {
+    // thing that asks for them; feedBars drops a request it already answered.
+    // A quotes file (永豐, 證交所) never carries bars of its own, so it asks
+    // Yahoo the same way the built-in feed does - only the demo walk skips
+    // this and draws demoBars instead (see the demoBars call below).
+    if (view === 'chart' && props.source !== 'demo' && props.quotes[props.focus]) {
       requestBars?.(props.market, props.quotes[props.focus].code)
     }
 
