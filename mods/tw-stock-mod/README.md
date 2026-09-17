@@ -47,12 +47,17 @@ first if the numbers in `hooks/board.tsx` look arbitrary.
 
 ## Install
 
+Install from inside the project you want the band in. `--scope local` keeps
+the mod in that one project, so your other projects keep a clean prompt:
+
 ```sh
 claude plugin marketplace add darrell-tw/darrelltw-mods
-claude plugin install tw-stock-mod@darrelltw-mods
+cd /path/to/your/project
+claude plugin install tw-stock-mod@darrelltw-mods --scope local
 ```
 
-Restart Claude Code and the band appears above the prompt.
+Restart Claude Code in that project and the band appears above the prompt.
+Drop `--scope local` to get the band in every project on the machine.
 
 Or try it for one session without installing:
 
@@ -64,9 +69,12 @@ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir darrelltw-mods/mods/tw-s
 To remove it:
 
 ```sh
-claude plugin uninstall tw-stock-mod
+claude plugin uninstall tw-stock-mod@darrelltw-mods --scope local
 claude plugin marketplace remove darrelltw-mods
 ```
+
+Run the uninstall from the same project, and match the scope you installed
+with: a `user` install needs `--scope user`.
 
 **哪個檔放哪裡.** `~/.claude/stock-band.json`（使用者層級，不進版控）放個人偏好——
 `twSources`、`shioaji` 的券商路徑；`<project>/.claude/stock-band.json`（可進版控）放

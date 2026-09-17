@@ -23,12 +23,17 @@ is in it, so adding an unrelated mod later does not make the name a lie.
    { "env": { "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1" } }
    ```
 
-2. Add this marketplace and install the mod you want:
+2. Add this marketplace, then install the mod you want from inside the
+   project you want it in. `--scope local` keeps the mod in that one project
+   instead of every project on the machine:
 
    ```sh
    claude plugin marketplace add darrell-tw/darrelltw-mods
-   claude plugin install tw-stock-mod@darrelltw-mods
+   cd /path/to/your/project
+   claude plugin install tw-stock-mod@darrelltw-mods --scope local
    ```
+
+   Drop `--scope local` only if you want the band above the prompt everywhere.
 
 3. Restart Claude Code.
 
@@ -38,9 +43,12 @@ Each mod's own README covers its config file, and the stock mod ships a
 To remove:
 
 ```sh
-claude plugin uninstall tw-stock-mod
+claude plugin uninstall tw-stock-mod@darrelltw-mods --scope local
 claude plugin marketplace remove darrelltw-mods
 ```
+
+Run the uninstall from the same project, and match the scope you installed
+with: a `user` install needs `--scope user`.
 
 ## Requirements
 
