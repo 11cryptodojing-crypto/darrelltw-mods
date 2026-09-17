@@ -24,9 +24,11 @@ See [The live feed](#the-live-feed).
 **損益 shows your holdings, not just the watchlist.** It is a stop in the
 market button's own cycle (美股 → 台股 → 台股庫存, …) — landing on it opens a
 sortable, scrollable P&L table (張數/成本/現價/今日%/今日損益/總損益/損益% per
-position, plus a portfolio total) read from `stock-holdings.json` (the
-runtime dir, or `<project>/.claude/` as a manual override — or a `holdings`
-block in `stock-band.json`). See [Holdings and the 損益 view](#holdings-and-the-損益-view).
+position, plus a portfolio total) read from a `holdings` block in
+`stock-band.json` (the recommended spot for hand-written positions), or from
+`stock-holdings.json` — the runtime dir's copy is the fetcher's own output,
+and `<project>/.claude/` holds an advanced manual override. See
+[Holdings and the 損益 view](#holdings-and-the-損益-view).
 
 Layout, colors and badges are ported from
 [`prototype/stock-band-demo.py`](prototype/stock-band-demo.py) — read that
@@ -43,7 +45,9 @@ first if the numbers in `hooks/board.tsx` look arbitrary.
 
   (Merge the `env` key if the file already has one.)
 - An interactive terminal. The band is `AbovePrompt`, so nothing draws in
-  `claude -p`, the desktop app or mobile.
+  `claude -p`, the desktop app or mobile. Measured on macOS iTerm2,
+  Terminal.app, and tmux. Windows and the VS Code integrated terminal are
+  untested — reports welcome.
 
 ## Install
 
@@ -74,7 +78,11 @@ claude plugin marketplace remove darrelltw-mods
 ```
 
 Run the uninstall from the same project, and match the scope you installed
-with: a `user` install needs `--scope user`.
+with: a `user` install needs `--scope user`. Uninstalling leaves the runtime
+files behind in `~/.claude/stock-band/<project slug>/` (quote cache,
+heartbeat, 永豐's log and pid, the SDK's own `shioaji.log`, and any holdings
+永豐 fetched) — delete that whole folder to clean those up too, using the same
+slug rule as 哪個檔放哪裡 below.
 
 **哪個檔放哪裡.** `~/.claude/stock-band.json`（使用者層級，不進版控）放個人偏好——
 `twSources`、`shioaji` 的券商路徑；`<project>/.claude/stock-band.json`（可進版控）放
@@ -85,6 +93,31 @@ with: a `user` install needs `--scope user`.
 ——`<project>/.claude/stock-band.json` 因此可以放心進版控，只有券商路徑該留在個人檔。
 Shioaji SDK 自己寫的 `shioaji.log` 也在這個執行期目錄——`fetch-quotes-shioaji.py`
 會先切到這裡再匯入 shioaji，所以不會跑進你的 repo。
+
+## Nothing shows up?
+
+Four different causes produce the exact same symptom — no band, and no error
+message anywhere — so check all four in order:
+
+1. `claude --version` needs to be 2.1.269 or later.
+2. Open Claude Code in that project and run `! echo
+   $CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`. It needs to print `1`. A blank line
+   means the flag is off — merge `{ "env": {
+   "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1" } }` into
+   `~/.claude/settings.json` (add just that key if `env` already exists).
+3. Fully quit and reopen Claude Code after editing settings.
+   `/reload-plugins` does not re-read `env`.
+4. Confirm the mod installed into the project you have open right now
+   (`--scope local` scopes one install to one project):
+
+   ```sh
+   grep -A3 'tw-stock-mod@darrelltw-mods' ~/.claude/plugins/installed_plugins.json | grep projectPath
+   ```
+
+   The path it prints needs to be this project. If it is not, run the
+   install command again from inside this project's directory. (`claude
+   plugin list` will not help here — every local install prints the same
+   `tw-stock-mod@darrelltw-mods / Scope: local` line with no path.)
 
 ## What the band shows
 
@@ -259,7 +292,7 @@ who opens it keeps their own preference — see
 | `pageMs` | `10000` | how long one page holds before the board turns, in ms (floor 4000; `0` turns auto-paging off and leaves `翻頁` as the only way to page). Pressing `翻頁` restarts this countdown |
 | `tw` / `us` | built-in lists | `{ code, name, prevClose }` per symbol; only `code` is required. Taiwan 上櫃 symbols need `"ex": "otc"` (e.g. 6488 環球晶) |
 | `twIndices` | TAIEX / SEMI / FINANCE / SHIPPING | which indices the footer flaps through on the Taiwan board — see [Picking your own Taiwan indices](#picking-your-own-taiwan-indices). `mis` route only |
-| `holdings` | `{ "tw": [], "us": [] }` | manual positions for the 損益 view, `{ code, qty, cost }` per holding; `.claude/stock-holdings.json` wins over this for whichever market it names — see [Holdings and the 損益 view](#holdings-and-the-損益-view) |
+| `holdings` | `{ "tw": [], "us": [] }` | manual positions for the 損益 view, `{ code, qty, cost }` per holding — the recommended place to hand-write your positions; add `"holdingsSource": "config"` to make this win over a fetched `stock-holdings.json` for a market where you want your own numbers to stick — see [Holdings and the 損益 view](#holdings-and-the-損益-view) |
 
 Both built-in lists are 20 symbols, so `columns` resolves to 2 and each page
 holds 10 (a single-column page holds 5). Past that the watchlist pages, and
@@ -493,19 +526,15 @@ so Latin names (`TAIEX`, `TPEx`) animate and Chinese ones do not.
 
 ### 永豐 Shioaji as that fetcher
 
-**What you need:**
+In a project with the mod installed, tell Claude 「我要接永豐」— the
+`stock-quote-sources` skill walks you through it. The prerequisites (account,
+API enabled, 簽署中心 pass, Python version) are in
+[`references/quote-sources.md`](references/quote-sources.md)'s
+「4. 永豐 Shioaji」→「What you need」; this README does not keep its own copy
+of that list.
 
-- A 永豐金 brokerage account with the API enabled and 簽署中心's "Python API
-  測試" passed.
-- A Python 3.12 or 3.13 venv (`shioaji` caps at Python 3.13).
-- `pip install shioaji` into that venv.
-- `SINOBON_API_KEY` / `SINOBON_SECRET_KEY` in `~/.sinobon.env` (or wherever
-  `--env` points).
-- macOS or Linux only — the band spawns the script with `nohup`, which
-  Windows does not have.
-
-Run `<python> scripts/fetch-quotes-shioaji.py --check` first to verify all of
-this before wiring it into `stock-band.json`. Common failure: HTTP 406 on
+Run `<python> scripts/fetch-quotes-shioaji.py --check` first to verify your
+setup before wiring it into `stock-band.json`. Common failure: HTTP 406 on
 login means 簽署中心's own test was never passed.
 
 [`scripts/fetch-quotes-shioaji.py`](scripts/fetch-quotes-shioaji.py) is one
@@ -571,10 +600,12 @@ costs and what was actually measured — is in
 
 ## Holdings and the 損益 view
 
-**Read order:** same as the quotes file — the runtime-dir
-`stock-holdings.json` wins whenever it parses, then
-`<project>/.claude/stock-holdings.json` as the manual override, then a
-`holdings` block in `stock-band.json`.
+**Read order:** the runtime-dir `stock-holdings.json` wins whenever it
+parses, then `<project>/.claude/stock-holdings.json` as the manual override,
+then a `holdings` block in `stock-band.json`. Set `"holdingsSource":
+"config"` to flip that for a market: the `holdings` block then wins over
+whichever file exists for that market, so a hand-written position sticks
+even after 永豐 starts writing its own.
 
 損益 is not its own button — it is a STOP in the market button's own cycle:
 `[ 美股 ▾ ]` → (`美股庫存`, only if US holdings are configured) → `[ 台股 ▾ ]`
@@ -605,26 +636,42 @@ totals row says there are more rows to scroll to in that direction. Sorting
 by a different column, or cycling the market button to a different stop,
 resets the scroll position back to the top.
 
-Write `<project>/.claude/stock-holdings.json` in the shape of
-[`stock-holdings.example.json`](stock-holdings.example.json):
+**Where to hand-write your holdings:**
 
-```jsonc
-{ "asOf": 1757900000000, "market": "tw", "source": "手動庫存",
-  "holdings": [ { "code": "2330", "name": "台積電", "qty": 1000, "cost": 980.5, "price": 1188.0, "prevClose": 1165.0 } ] }
-```
+- **Recommended:** the `holdings` block in `~/.claude/stock-band.json`, in
+  the shape `{ "holdings": { "tw": [ { "code", "name", "qty", "cost" } ], "us": [] } }`
+  — `qty` is shares, not 張. This file already lives outside version control
+  and already holds your personal preferences (see
+  [Configure](#configure)), so there is no folder to create first. Wiring up
+  永豐 later fetches your real positions and overrides this automatically;
+  add `"holdingsSource": "config"` if you want the hand-written numbers to
+  keep winning instead. The footer/title then calls the source `設定檔`.
+- **Advanced:** `<project>/.claude/stock-holdings.json`, in the shape of
+  [`stock-holdings.example.json`](stock-holdings.example.json):
 
-`qty` is shares (股), not 張 — the band divides by 1000 itself for the 張數
-column. `cost` is the average cost per share. `price`/`prevClose` are
-optional — the band prefers a live quote for that code first (from the
-watchlist, or from the extra codes the feed fetches for exactly this reason)
-and only falls back to these when nothing priced that code. Unlike the
-quotes file, this one is never expired by age: a position does not go wrong
-just because nobody wrote a fresh copy in the last two minutes. `source` is
-free text for the footer/title, but never write `永豐 庫存` into a
-project-path file by hand — that label is reserved for
-`scripts/fetch-quotes-shioaji.py`'s own output, and a hand-written file
-carrying it reads as a stale copy of the fetcher's legacy (pre-runtime-dir)
-output and gets ignored (see `references/quote-sources.md` §6).
+  ```jsonc
+  { "asOf": 1757900000000, "market": "tw", "source": "手動庫存",
+    "holdings": [ { "code": "2330", "name": "台積電", "qty": 1000, "cost": 980.5, "price": 1188.0, "prevClose": 1165.0 } ] }
+  ```
+
+  Use this only when you need to share one holdings file with teammates
+  through the project, or need a per-holding manual fallback `price` /
+  `prevClose`. `qty` is shares (股), not 張 — the band divides by 1000 itself
+  for the 張數 column. `cost` is the average cost per share. `price` /
+  `prevClose` are optional — the band prefers a live quote for that code
+  first (from the watchlist, or from the extra codes the feed fetches for
+  exactly this reason) and only falls back to these when nothing priced that
+  code. Unlike the quotes file, this one is never expired by age: a position
+  does not go wrong just because nobody wrote a fresh copy in the last two
+  minutes. `source` is free text for the footer/title, but never write
+  `永豐 庫存` into a project-path file by hand — that label is reserved for
+  `scripts/fetch-quotes-shioaji.py`'s own output, and a hand-written file
+  carrying it reads as a stale copy of the fetcher's legacy (pre-runtime-dir)
+  output and gets ignored (see `references/quote-sources.md` §6). If you use
+  this file, add `.claude/stock-holdings.json` to your `.gitignore`.
+- **Do not hand-write** `~/.claude/stock-band/<project slug>/stock-holdings.json`
+  — that is 永豐's fetcher output, rewritten every tick, and the band never
+  creates that runtime folder for you.
 
 **The title's 更新 time.** `asOf` shows there when the file states one; a
 manual file, or a `holdings` block in `stock-band.json`, usually has no
@@ -632,12 +679,12 @@ timestamp of its own (`asOf: 0`) — rather than print `更新 --:--`, the title
 falls back to the SAME quote time the watchlist footer already shows for
 that market, since the holdings are priced off that live quote anyway.
 
-No fetcher running? Add a `holdings` block to `stock-band.json` instead
-(see [Configure](#configure)) — the holdings file wins over it for whichever
-market it names. The footer/title then calls the source `設定檔` — it means
-the rows came from `holdings` in `stock-band.json` (the user's or the
-project's), not from a broker, so a 設定檔 label is a hint to keep the
-numbers up to date by hand.
+No fetcher running? The `holdings` block in `stock-band.json` (see
+[Configure](#configure)) is the recommended way to hand-write positions —
+see [Where to hand-write your holdings](#holdings-and-the-損益-view) above.
+The footer/title calls that source `設定檔` — it means the rows came from
+`holdings` in `stock-band.json` (the user's or the project's), not from a
+broker, so a 設定檔 label is a hint to keep the numbers up to date by hand.
 
 `scripts/fetch-quotes-shioaji.py` writes this file automatically every tick,
 from `api.list_positions()` — see

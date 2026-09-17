@@ -48,7 +48,35 @@ claude plugin marketplace remove darrelltw-mods
 ```
 
 Run the uninstall from the same project, and match the scope you installed
-with: a `user` install needs `--scope user`.
+with: a `user` install needs `--scope user`. Uninstalling leaves the runtime
+files behind in `~/.claude/stock-band/<project slug>/` (quote cache,
+heartbeat, 永豐's log and pid, the SDK's own `shioaji.log`, and any holdings
+永豐 fetched) — delete that whole folder to clean those up too.
+
+## Nothing shows up?
+
+Four different causes produce the exact same symptom — no band, and no error
+message anywhere — so check all four in order:
+
+1. `claude --version` needs to be 2.1.269 or later.
+2. Open Claude Code in that project and run `! echo
+   $CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`. It needs to print `1`. A blank line
+   means the flag is off — merge `{ "env": {
+   "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1" } }` into
+   `~/.claude/settings.json` (add just that key if `env` already exists).
+3. Fully quit and reopen Claude Code after editing settings.
+   `/reload-plugins` does not re-read `env`.
+4. Confirm the mod installed into the project you have open right now
+   (`--scope local` scopes one install to one project):
+
+   ```sh
+   grep -A3 'tw-stock-mod@darrelltw-mods' ~/.claude/plugins/installed_plugins.json | grep projectPath
+   ```
+
+   The path it prints needs to be this project. If it is not, run the
+   install command again from inside this project's directory. (`claude
+   plugin list` will not help here — every local install prints the same
+   `tw-stock-mod@darrelltw-mods / Scope: local` line with no path.)
 
 ## Requirements
 
@@ -57,7 +85,9 @@ with: a `user` install needs `--scope user`.
 - **`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`.** Function hooks are early access;
   without the flag Claude Code ignores the `modules` key and nothing loads.
 - **An interactive terminal.** `AbovePrompt` is terminal-only — nothing draws
-  in `claude -p`, the desktop app, or mobile.
+  in `claude -p`, the desktop app, or mobile. Measured on macOS iTerm2,
+  Terminal.app, and tmux. Windows and the VS Code integrated terminal are
+  untested — reports welcome.
 
 ## Repo layout
 
