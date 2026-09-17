@@ -82,7 +82,8 @@ with: a `user` install needs `--scope user`. Uninstalling leaves the runtime
 files behind in `~/.claude/stock-band/<project slug>/` (quote cache,
 heartbeat, 永豐's log and pid, the SDK's own `shioaji.log`, and any holdings
 永豐 fetched) — delete that whole folder to clean those up too, using the same
-slug rule as 哪個檔放哪裡 below.
+slug rule as 哪個檔放哪裡 below. The folder only exists once 永豐's fetcher has
+run; a Yahoo-only install never creates it.
 
 **哪個檔放哪裡.** `~/.claude/stock-band.json`（使用者層級，不進版控）放個人偏好——
 `twSources`、`shioaji` 的券商路徑；`<project>/.claude/stock-band.json`（可進版控）放
@@ -111,10 +112,10 @@ message anywhere — so check all four in order:
    (`--scope local` scopes one install to one project):
 
    ```sh
-   grep -A3 'tw-stock-mod@darrelltw-mods' ~/.claude/plugins/installed_plugins.json | grep projectPath
+   sed -n '/tw-stock-mod@darrelltw-mods/,/^    \]/p' ~/.claude/plugins/installed_plugins.json | grep projectPath
    ```
 
-   The path it prints needs to be this project. If it is not, run the
+   It prints one path per install; this project must be one of them. If it is not, run the
    install command again from inside this project's directory. (`claude
    plugin list` will not help here — every local install prints the same
    `tw-stock-mod@darrelltw-mods / Scope: local` line with no path.)

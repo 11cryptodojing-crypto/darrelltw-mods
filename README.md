@@ -38,7 +38,7 @@ is in it, so adding an unrelated mod later does not make the name a lie.
 3. Restart Claude Code.
 
 Each mod's own README covers its config file, and the stock mod ships a
-`/stock-band-setup` command that writes one for you.
+`/tw-stock-mod:stock-band-setup` command that writes one for you.
 
 To remove:
 
@@ -51,7 +51,8 @@ Run the uninstall from the same project, and match the scope you installed
 with: a `user` install needs `--scope user`. Uninstalling leaves the runtime
 files behind in `~/.claude/stock-band/<project slug>/` (quote cache,
 heartbeat, 永豐's log and pid, the SDK's own `shioaji.log`, and any holdings
-永豐 fetched) — delete that whole folder to clean those up too.
+永豐 fetched) — delete that whole folder to clean those up too. The folder
+only exists once 永豐's fetcher has run; a Yahoo-only install never creates it.
 
 ## Nothing shows up?
 
@@ -70,10 +71,10 @@ message anywhere — so check all four in order:
    (`--scope local` scopes one install to one project):
 
    ```sh
-   grep -A3 'tw-stock-mod@darrelltw-mods' ~/.claude/plugins/installed_plugins.json | grep projectPath
+   sed -n '/tw-stock-mod@darrelltw-mods/,/^    \]/p' ~/.claude/plugins/installed_plugins.json | grep projectPath
    ```
 
-   The path it prints needs to be this project. If it is not, run the
+   It prints one path per install; this project must be one of them. If it is not, run the
    install command again from inside this project's directory. (`claude
    plugin list` will not help here — every local install prints the same
    `tw-stock-mod@darrelltw-mods / Scope: local` line with no path.)
