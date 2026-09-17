@@ -42,28 +42,28 @@ description: 引導使用者設定 tw-stock-mod 的台股／美股觀察清單
 
 ## 3. 驗證每個代號真的能報價——不要跳過
 
-台股跟美股走**不同的來源**，驗證也要打不同的端點。
+台股跟美股都用 Yahoo 的 spark endpoint 驗證；差別只在台股要多帶交易所後綴分辨上市／上櫃。
 
-### 3a. 台股：打證交所 MIS
+### 3a. 台股：打 Yahoo spark，同時帶 `.TW` 與 `.TWO` 後綴
 
-band 的台股報價預設走 Yahoo（`twSources: ["yahoo"]`，見 3b），但驗證代號還是用證交所
-MIS 這支端點——它是即時的，能馬上看出代號打對了沒，設定 `twSources: ["mis"]`（備用即時路線）
-或 `twSources: ["shioaji"]`（永豐即時，見 README）時也是走同一批代號。
-每個代號**同時查上市和上櫃兩個頻道**，因為代號本身看不出是哪一種：
+band 的台股報價預設走 Yahoo（`twSources: ["yahoo"]`，見 3b），或 `twSources: ["shioaji"]`
+（永豐即時，見 README）時也是走同一批代號。驗證代號用同一支 spark endpoint——代號本身看不出
+是上市還是上櫃，所以每個代號**同時查兩個後綴**：
 
 ```
-https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_2330.tw|otc_2330.tw|tse_6488.tw|otc_6488.tw&json=1&delay=0
+https://query1.finance.yahoo.com/v7/finance/spark?symbols=2330.TW,2330.TWO,6488.TW,6488.TWO&range=1d&interval=5m
 ```
 
-回傳的 `msgArray` 只會給查得到的那一邊，查不到的位置是空物件（沒有 `c` 欄位）。所以：
+回傳的 `spark.result` 只會列出查得到的那個後綴，查不到的後綴直接不出現在陣列裡（不是空物件）。
+所以：
 
-- `ex` 回 `tse` → 上市，設定檔照常寫 `{ "code": "2330", "name": "台積電" }`。
-- `ex` 回 `otc` → 上櫃，**設定檔必須多寫 `"ex": "otc"`**（例：
+- `.TW` 有資料 → 上市，設定檔照常寫 `{ "code": "2330", "name": "台積電" }`。
+- `.TWO` 有資料 → 上櫃，**設定檔必須多寫 `"ex": "otc"`**（例：
   `{ "code": "6488", "name": "環球晶", "ex": "otc" }`）。漏了這個欄位，band 會去查
-  `tse_6488.tw`，那個頻道不存在，這一列就永遠沒有價格。
-- 兩邊都沒回 → 代號查不到，**明確跟使用者說是哪幾檔**，不要默默寫進檔案。
+  `6488.TW`，那個後綴查不到這檔，這一列就永遠沒有價格。
+- 兩個後綴都沒回 → 代號查不到，**明確跟使用者說是哪幾檔**，不要默默寫進檔案。
 
-名稱可以直接用回傳的 `n` 欄位補上。這支端點一樣要帶瀏覽器 User-Agent。
+這支端點跟 3b 一樣要帶瀏覽器 User-Agent。
 
 ### 3b. 美股：打 Yahoo spark
 
@@ -92,7 +92,7 @@ Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)
 - 如果 `.claude/stock-band.json` 已經存在，**先把新舊內容的差異（diff）展示給使用者看，等他同意才覆蓋**——不要沒問就整份蓋掉既有設定。
 - 把驗證過的代號寫進對應的 `tw` / `us` 陣列。**只有 `code` 是必填**，寫
   `{ "code": "NVDA", "name": "NVIDIA" }` 就夠了。台股上櫃多一個 `"ex": "otc"`（見 3a）。
-- **不要自己編 `prevClose`。** 這個欄位是昨收價，band 拿它算漲跌幅；填一個猜的數字，使用者會在畫面上看到錯的漲跌幅，而且看不出是假的。省略它，即時報價會帶正確的昨收價進來。真的要寫死，只能填這次驗證時回傳的昨收（Yahoo 的 `meta.previousClose`、MIS 的 `y`），不能拿當下價格代替。
+- **不要自己編 `prevClose`。** 這個欄位是昨收價，band 拿它算漲跌幅；填一個猜的數字，使用者會在畫面上看到錯的漲跌幅，而且看不出是假的。省略它，即時報價會帶正確的昨收價進來。真的要寫死，只能填這次驗證時回傳的昨收（Yahoo 的 `meta.previousClose`），不能拿當下價格代替。
 
 ## 5. 提醒使用者重新載入
 
@@ -100,4 +100,4 @@ Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)
 
 ## 附註：`twSources`（報價來源順序）別寫進專案設定檔
 
-`twSources`（例如 `["shioaji", "yahoo", "mis"]`）跟 `shioaji` 區塊是**個人偏好**，不是專案設定——band 讀 `~/.claude/stock-band.json`（使用者層級，不進版本控制）疊在 `<project>/.claude/stock-band.json` 之下再合併。如果使用者要設定報價來源順序或永豐帳號路徑，寫進 `~/.claude/stock-band.json`，不要寫進這裡正在編輯的專案檔——這樣專案設定才能保持中立，其他人打開同一個專案時用的是他自己的順序。細節見 README 的「Your own source order」與 `references/quote-sources.md` 的「Preference order and the user-level file」。
+`twSources`（例如 `["shioaji", "yahoo"]`）跟 `shioaji` 區塊是**個人偏好**，不是專案設定——band 讀 `~/.claude/stock-band.json`（使用者層級，不進版本控制）疊在 `<project>/.claude/stock-band.json` 之下再合併。如果使用者要設定報價來源順序或永豐帳號路徑，寫進 `~/.claude/stock-band.json`，不要寫進這裡正在編輯的專案檔——這樣專案設定才能保持中立，其他人打開同一個專案時用的是他自己的順序。細節見 README 的「Your own source order」與 `references/quote-sources.md` 的「Preference order and the user-level file」。

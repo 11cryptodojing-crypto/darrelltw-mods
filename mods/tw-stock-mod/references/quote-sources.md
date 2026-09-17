@@ -7,7 +7,7 @@ here — exact requests, exact bytes back, exact failures — lives in
 to choose a source; read that one to see the evidence.
 
 Every route below writes into one of the same places the band already reads:
-`hooks/register.tsx`'s built-in feed (Yahoo, MIS), the runtime-dir override
+`hooks/register.tsx`'s built-in Yahoo feed, the runtime-dir override
 file at `~/.claude/stock-band/<project-slug>/stock-quotes.json` (what
 `fetch-quotes-shioaji.py` writes), or the project's own
 `<project>/.claude/stock-quotes.json` as a manual override (read order:
@@ -20,18 +20,17 @@ care which route filled in a number.
 | Route | Key / account | Process to keep running | Freshness | Intraday series (`spark` column) | K bars | 昨收 (previous close) | 上市/上櫃 resolution | Footer tag |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | **Yahoo** (default) | none | none | US: real-time. Taiwan: ~20 min behind | Yes, native | Yes, native | Yes | Config's own `"ex": "otc"` | `Yahoo 即時` (US) / `Yahoo 延遲` (Taiwan) |
-| **證交所 MIS** (backup, real-time, no account) | none | none | Real intraday (~5 s snapshot) | No — borrows one Yahoo call for this column only | No — same borrow, per-symbol | Yes (`y` field) | Config's own `"ex": "otc"`, on the `otc_` channel | `證交所 即時` |
 | **Quotes-file override** | depends on what writes it | depends on what writes it | Whatever the writer promises | Only if the writer fills `series` | Only if the writer fills `bars` | Only if the writer fills `prevClose` | Handled by the writer, before the file is written | `source` string in the file, or `報價檔` if it leaves that blank |
 | **永豐 Shioaji**, `twSources: ["shioaji"]` | 永豐金 brokerage account + API access | No — the band spawns and re-spawns it itself | Real intraday tick | No — the script does not fill it (unverified whether Shioaji itself carries one) | No — same | Yes (`contract.reference`) | Automatic — the SDK resolves it | `永豐 即時` |
 | **Fugle 富果** (not wired) | Free Fugle membership | Whatever you write | Real intraday | Not from the one REST endpoint checked | Not from the one REST endpoint checked | Yes (`previousClose`) | Automatic — the symbol alone is enough | Whatever `source` your fetcher writes |
 
 ## Preference order and the user-level file
 
-Taiwan's three built-in routes (Yahoo, MIS, Shioaji) are not a single choice
+Taiwan's two built-in routes (Yahoo, Shioaji) are not a single choice
 any more - `twSources` is an ARRAY, in preference order: `["shioaji",
-"yahoo", "mis"]` tries Shioaji first, and for any tick Shioaji has nothing
+"yahoo"]` tries Shioaji first, and for any tick Shioaji has nothing
 fresh for (the script has not logged in yet, or died) falls through to Yahoo,
-then MIS, without waiting out the full 120s staleness window. The footer's
+without waiting out the full 120s staleness window. The footer's
 source tag always names whichever route actually answered that tick, never
 the one that was merely preferred. The shipped default is `["yahoo"]` alone;
 a legacy `"twSource": "x"` (singular, a string) is still read as an alias for
@@ -46,7 +45,7 @@ project and therefore never lands in version control:
 ```jsonc
 // ~/.claude/stock-band.json
 {
-  "twSources": ["shioaji", "yahoo", "mis"],
+  "twSources": ["shioaji", "yahoo"],
   "shioaji": { "python": "python3", "env": "~/.sinobon.env", "interval": 10 }
 }
 ```
@@ -73,9 +72,8 @@ trend column), and `regularMarketTime` (the exchange's own clock, printed as
 column and the trend view.
 
 **Freshness.** US quotes are real-time. Taiwan quotes through Yahoo run about
-20 minutes behind — measured 2026-09-16: Yahoo said 10:29:05 for 2330 while
-證交所 MIS said 10:48:36 for the same symbol at the same moment. That gap is
-why Taiwan also has an opt-in real-time route (§2).
+20 minutes behind the exchange's own tape. Real intraday Taiwan prices are
+available through a 永豐 brokerage account instead (§3).
 
 **Turn it on.** Nothing to do — it is the default for both markets. To be
 explicit about it in `<project>/.claude/stock-band.json`:
@@ -92,49 +90,10 @@ whether the number is live or 20 minutes old.
 20 symbols — a 21st gets `Number of symbols needs to be less than or equal to
 20` back, so a full watchlist plus indices costs two requests, not one. No
 official rate limit is published; the community number is roughly 360
-requests/hour, and the band's own budget of 300/hour (see §6) sits under it on
+requests/hour, and the band's own budget of 300/hour (see §5) sits under it on
 purpose.
 
-## 2. 證交所 MIS (backup route, `"twSources": ["mis"]`)
-
-No key, no account, nothing to run — same shape as Yahoo, but Taiwan-only and
-truly real-time. Yahoo stays the default (§1); reach for this when Yahoo's
-~20-minute Taiwan lag matters and a 永豐 account (§4) is not an option.
-
-**How to turn it on.** One line in `<project>/.claude/stock-band.json`:
-
-```jsonc
-{ "twSources": ["mis"] }
-```
-
-**What it does and does not carry.** One request answers the whole Taiwan
-watchlist plus 加權指數 and 櫃買指數 together — current price, previous close
-(`y`), open/high/low, volume, and the trade timestamp. It carries **no
-intraday series and no bars** — MIS is a snapshot, not a history. The `spark`
-trend column still needs a series, so turning it on with `twSources: ["mis"]`
-makes the feed pay for one extra Yahoo call just for that column; the `kbar`
-column and the trend view already go to Yahoo per-symbol on both routes.
-
-**上市/上櫃.** MIS reads a symbol's exchange off the config, not off the
-symbol itself: a 上櫃 stock needs `"ex": "otc"` in its watchlist entry, and it
-answers on the `otc_` channel (`otc_6488.tw`) instead of `tse_`
-(`tse_2330.tw`). Get this wrong and the symbol comes back with nothing.
-
-**The `z`-field trap.** MIS's `z` field — the last trade — reads `-` between
-trades, not the last price and not zero. The actual last deal is in
-`trade.z`; a symbol that has not traded yet today falls further back to `o`
-(open) and finally `y` (previous close). Reading `z` alone leaves the row
-blank whenever the market pauses between prints.
-
-**How to tell it took.** The footer reads `證交所 即時`.
-
-**Rate limits.** No published limit, and the response carries no rate-limit
-headers — this is an internal endpoint the exchange's own market-data page
-calls, not a documented public API. Measured: 1-second intervals, 8 requests
-in a row, all `200` with `rtcode 0000`. The band's default (30 s, one batched
-request for the whole watchlist) sits far under anything tested.
-
-## 3. The quotes-file override
+## 2. The quotes-file override
 
 **Two files, one seam.** `fetch-quotes-shioaji.py` (and the band, when it
 spawns it) writes `~/.claude/stock-band/<project-slug>/stock-quotes.json`,
@@ -142,8 +101,8 @@ which wins while fresh; `<project>/.claude/stock-quotes.json` is the
 hand-editable seam below, and wins over the built-in feed whenever the
 runtime-dir file is not fresh. Write `<project>/.claude/stock-quotes.json` in
 the shape of [`stock-quotes.example.json`](../stock-quotes.example.json), and
-the band uses it instead of Yahoo or MIS — **this is the seam for any source
-the module does not speak natively**, including Shioaji (§4) and Fugle (§5).
+the band uses it instead of Yahoo — **this is the seam for any source
+the module does not speak natively**, including Shioaji (§3) and Fugle (§4).
 
 **The contract.** A file with these keys:
 
@@ -182,7 +141,7 @@ treated exactly like no file.
 **How to tell it took.** The footer shows whatever string you put in
 `source`; leave it out and it falls back to `報價檔`.
 
-## 4. 永豐 Shioaji, through `scripts/fetch-quotes-shioaji.py`
+## 3. 永豐 Shioaji, through `scripts/fetch-quotes-shioaji.py`
 
 **What you need:**
 
@@ -202,18 +161,18 @@ treated exactly like no file.
 - **A long-lived process.** `api.login()` takes seconds and holds a session —
   measured: `api.usage()` after login reports `connections=1,
   limit_bytes=524288000`. Calling it every 30 seconds the way the built-in
-  feed calls Yahoo or MIS means logging in and out every 30 seconds, which is
+  feed calls Yahoo means logging in and out every 30 seconds, which is
   not what a broker session is for.
 
-**Why this cannot live inside the hooks module.** MIS and Yahoo are both one
-HTTP GET — `$.http.fetch` calls them directly. Shioaji is a Python SDK; the
+**Why this cannot live inside the hooks module.** Yahoo is one
+HTTP GET — `$.http.fetch` calls it directly. Shioaji is a Python SDK; the
 hooks module runs in a JS sandbox and can only reach it through `$.process`.
 And there is no 永豐 CLI to spawn per-tick anyway: `pip install shioaji`
 installs a `shioaji` command, but running it only prints `Hello from
 shioaji!` — it is a placeholder entry point (`shioaji/__init__.py:18`), not an
 interface. The SDK's Python API is the whole interface, so a script that logs
 in once and stays running is the shape that fits, writing the override file
-from §3 on a loop.
+from §2 on a loop.
 
 **Turn it on, managed by the band.** Put `"twSources": ["shioaji", ...]` and
 the `shioaji` block in `~/.claude/stock-band.json` (not the project's - see
@@ -277,9 +236,9 @@ one spawning the process.
 **What it carries.** `api.snapshots()` gives current price, and
 `contract.reference` gives 昨收 in the broker's own terms — this stays correct
 through an ex-dividend date, unlike a plain "yesterday's close".
-`snapshot.close` is always the last trade; unlike MIS's `z` it never reads
+`snapshot.close` is always the last trade and never reads
 `-`, so there is no between-trades gap to patch. 上市/上櫃 resolves itself —
-the script does not need an `"ex": "otc"` hint the way MIS does.
+the script does not need an `"ex": "otc"` hint the way Yahoo does.
 
 **The timestamp trap.** `snapshot.ts` is nanoseconds, but Shioaji stamps it
 with **Taipei wall-clock time counted as if it were UTC** — a snapshot taken
@@ -292,14 +251,14 @@ prints `更新 18:55` for a 10:55 snapshot.
 `"source": "永豐 即時"` in the file it writes).
 
 **Holdings.** The script also calls `api.list_positions()` every tick and
-writes `<project>/.claude/stock-holdings.json` — see §6. Its quotes fetch
+writes `<project>/.claude/stock-holdings.json` — see §5. Its quotes fetch
 covers the watchlist UNION every held code, so a holding that never made the
 watchlist still gets a live price there too, which the 損益 view prefers over
 the holdings file's own `price`/`prevClose`.
 
-## 5. Fugle 富果 and other keyed vendors (not wired)
+## 4. Fugle 富果 and other keyed vendors (not wired)
 
-Fugle is not built into the module. Route 3 (the quotes-file override) is how
+Fugle is not built into the module. Route 2 (the quotes-file override) is how
 it — or any other vendor with a key — reaches the band; nobody has written
 that fetcher yet. What it has to do:
 
@@ -309,13 +268,13 @@ that fetcher yet. What it has to do:
 - **Call Fugle's intraday quote endpoint per symbol.** The free REST tier has
   no batch/snapshot endpoint, so a 20-symbol watchlist costs 20 requests per
   refresh, and the endpoint caps at 60 requests/minute. A full watchlist
-  refresh under that cap lands far slower than MIS's one request for the same
-  20 symbols — do not expect sub-minute updates from this route without a
-  paid tier.
-- **Map Fugle's fields onto the quotes-file contract from §3**: its quote
+  refresh under that cap lands far slower than a single batched Yahoo request
+  for the same 20 symbols — do not expect sub-minute updates from this route
+  without a paid tier.
+- **Map Fugle's fields onto the quotes-file contract from §2**: its quote
   response's last price, previous close and quote timestamp become that
   symbol's `price`, `prevClose` and the file's `dataAt`.
-- **Respect Fugle's terms**, which matter more here than for Yahoo or MIS
+- **Respect Fugle's terms**, which matter more here than for Yahoo
   because Fugle actually publishes them: no forwarding market data to a third
   party, and one Fugle account per user — a plugin cannot embed a shared key
   and proxy requests for everyone who installs it. Each user who wants this
@@ -325,13 +284,13 @@ that fetcher yet. What it has to do:
 
 Fugle resolves 上市/上櫃 by symbol alone — its data source already spans both
 the exchange and 櫃買中心, so a fetcher does not need an `"ex"` hint the way
-MIS does.
+Yahoo does.
 
-## 6. The holdings file and the 損益 view
+## 5. The holdings file and the 損益 view
 
 `stock-holdings.json` is what the 損益 button reads — positions, not
 watchlist prices. `scripts/fetch-quotes-shioaji.py` writes it every tick
-after `list_positions` (§4) into the runtime dir
+after `list_positions` (§3) into the runtime dir
 (`~/.claude/stock-band/<project-slug>/`), which wins whenever it parses;
 `<project>/.claude/stock-holdings.json` is the manual override, and anything
 else can write either one by hand or from its own fetcher, in the shape of
@@ -344,10 +303,10 @@ else can write either one by hand or from its own fetcher, in the shape of
 
 `qty` is shares (股), not 張. `cost` is the average cost per share.
 `price`/`prevClose` are optional — the band prefers a live quote for that
-code first (see the UNION note in §4) and only falls back to these when
+code first (see the UNION note in §3) and only falls back to these when
 nothing priced that code. `source` is free text for the footer/title, but a
 project-path file written by hand must never carry `"source": "永豐 庫存"`
-— that label is reserved for `fetch-quotes-shioaji.py`'s own output (§4), and
+— that label is reserved for `fetch-quotes-shioaji.py`'s own output (§3), and
 the band treats a project-path file with that exact source as a stale copy
 of the fetcher's pre-runtime-dir output and ignores it.
 
@@ -370,7 +329,7 @@ file does not cover falls back to the config block.
 
 Any source not listed above — another vendor, a spreadsheet, a paper-trading
 simulator — reaches the band the same way Shioaji does: write
-`<project>/.claude/stock-quotes.json` in the §3 shape, on whatever schedule
+`<project>/.claude/stock-quotes.json` in the §2 shape, on whatever schedule
 your source supports.
 
 **The file contract**, restated: `asOf` and `dataAt` in epoch milliseconds,

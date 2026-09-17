@@ -1,6 +1,6 @@
 ---
 name: stock-quote-sources
-description: Use when the user wants to change, choose, or wire where tw-stock-mod's stock prices come from — switching the feed, connecting a broker or vendor API, or asking why a price looks stale. Trigger words include 換報價來源, 接證交所, 接永豐, 接 API, 即時報價, 股價來源, 換成 Yahoo, quote source, switch feed, wire shioaji, real-time quotes.
+description: Use when the user wants to change, choose, or wire where tw-stock-mod's stock prices come from — switching the feed, connecting a broker or vendor API, or asking why a price looks stale. Trigger words include 換報價來源, 接永豐, 接 API, 即時報價, 股價來源, 換成 Yahoo, quote source, switch feed, wire shioaji, real-time quotes.
 ---
 
 # Wiring tw-stock-mod's quote sources
@@ -15,10 +15,9 @@ section.
 | What the user wants | Route |
 | --- | --- |
 | Just works, no setup | Yahoo — already the default for both markets |
-| Real intraday Taiwan prices, no key, no account | 證交所 MIS — one config line, a backup route |
 | Real-time Taiwan prices, has a 永豐/Sinopac account | Shioaji, `twSources: ["shioaji"]` — the band runs the fetcher itself |
 | Prices from their own broker or a paid vendor | The quotes-file override, fed by a script |
-| Specifically 富果/Fugle | Not built in — write a small fetcher into the override (§5 of the reference) |
+| Specifically 富果/Fugle | Not built in — write a small fetcher into the override (§4 of the reference) |
 | Something else entirely (custom data, a simulator) | Write a fetcher into the override ("Write your own fetcher" in the reference) |
 
 ## Steps per route
@@ -26,13 +25,6 @@ section.
 **Yahoo (default).** Nothing to do. To be explicit, set
 `"twSources": ["yahoo"]` in `<project>/.claude/stock-band.json`. Footer tag:
 `Yahoo 即時` (US) / `Yahoo 延遲` (Taiwan, ~20 min behind).
-
-**證交所 MIS (backup, real-time Taiwan, no account).** Set `"twSources":
-["mis"]` — in `~/.claude/stock-band.json` (recommended: a source order is a
-personal preference, and that file merges under a project's own so it never
-needs editing per-project) or in `<project>/.claude/stock-band.json` if the
-user specifically wants it project-wide. If the watchlist has 上櫃 symbols,
-each one needs `"ex": "otc"` or it returns nothing. Footer tag: `證交所 即時`.
 
 **永豐 Shioaji, managed by the band.** Put `SINOBON_API_KEY`/`SINOBON_SECRET_KEY`
 in an env file outside the repo, and set `~/.claude/stock-band.json` (NOT the
@@ -78,8 +70,8 @@ the built-in feed (missing `User-Agent`, cached URLs, budget vs. interval).
 
 ## Checking it took
 
-The band's footer names its source: `Yahoo 即時` / `Yahoo 延遲` / `證交所
-即時` / a fetcher's own `source` string, falling back to `報價檔` / `示範資料
+The band's footer names its source: `Yahoo 即時` / `Yahoo 延遲` / a
+fetcher's own `source` string, falling back to `報價檔` / `示範資料
 （未接 API）` when nothing is fresh. If the footer still says 示範資料 after
 wiring a route, the feed or the override file is not landing — check the file
 is younger than 120 seconds and re-read the matching section of

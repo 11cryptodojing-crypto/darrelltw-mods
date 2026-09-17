@@ -1301,7 +1301,8 @@ function buildProps(
   quotesFile: QuotesFile | undefined,
   mode: MarketMode,
   view: View,
-  focus: number,
+  /** which code the chart view is following; undefined or off-screen falls back to position 0 */
+  focusCode: string | undefined,
 ): BoardProps {
   const { market, phase } = pickMarket(now, mode)
   const conf = MARKETS[market]
@@ -1344,6 +1345,26 @@ function buildProps(
   const perPage = pageSize(columns)
   const pages = Math.max(1, Math.ceil(quotes.length / perPage))
   lastPageCount = pages
+
+  // The chart view follows a CODE, not a page: `page` only moves through
+  // setPage (a table page turn) or autoPage, and autoPage freezes itself the
+  // moment view !== 'table' (see autoPage). With `cfg.sort === 'change'`
+  // `quotes` re-sorts every render, so the focused code's rank - and so its
+  // page - can drift out from under a `page` that nothing is moving. This
+  // jumps `page` straight to wherever the code actually sits, before `shown`
+  // is sliced, so the chart never reads a foreign row off a stale page. It
+  // writes `page` directly rather than going through setPage: setPage's
+  // pageFrom/pageFromAt bookkeeping only feeds the table's page-turn flap,
+  // which the chart view does not draw, and this jump carries no such
+  // animation of its own.
+  if (view === 'chart' && focusCode !== undefined) {
+    const fullIdx = quotes.findIndex(q => q.code === focusCode)
+    if (fullIdx >= 0) {
+      const focusPage = Math.floor(fullIdx / perPage)
+      if (focusPage !== ((page % pages) + pages) % pages) page = focusPage
+    }
+  }
+
   const pageIdx = ((page % pages) + pages) % pages
   const shown = quotes.slice(pageIdx * perPage, pageIdx * perPage + perPage)
 
@@ -1351,7 +1372,7 @@ function buildProps(
   // ones whose price did not move, and including the symbol and the name.
   // Price updates keep their own `was` (set in quoteRow), which carries no
   // code/name and so leaves the left-hand columns still.
-  if (pageFrom && now - pageAt < PAGE_TURN_WINDOW_MS) {
+  if (pageFrom && pageFromMarket === market && now - pageFromAt < PAGE_TURN_WINDOW_MS) {
     for (let i = 0; i < shown.length; i++) {
       const before = pageFrom[i]
       if (!before) continue
@@ -1366,10 +1387,54 @@ function buildProps(
         },
       }
     }
+  } else {
+    // No page turn is running, but a row's OCCUPANT can still change: with
+    // `cfg.sort === 'change'` the list re-sorts every render, so a rank
+    // cross moves a code to a different on-screen position without page or
+    // sort key ever changing. Comparing this render's row at position i
+    // against what `lastShown` actually drew there last render catches
+    // that - the whole-page flap above cannot, because it only runs inside
+    // a page turn's own window. Merging into whatever price-only `was`
+    // quoteRow() already attached (rather than requiring the row have none)
+    // makes a rank cross that also lands on a row whose own price moved
+    // turn both halves, not just the price side.
+    let ranksCrossed = false
+    // `lastShown` only means something as a rank-cross baseline when it was
+    // drawn for THIS market - onCycle can switch markets without a page turn
+    // or a pnl turn (see `lastShownMarket` above), and a stale other-market
+    // `lastShown` would compare AAPL's row against 2330's row on nothing more
+    // than shared position. Gated on `quotesFile` too: with no quotes file
+    // the whole page is priced by demoPrice()'s continuous sine walk, whose
+    // pct keeps drifting by a hair every render - with `cfg.sort ===
+    // 'change'` that alone reshuffles two close-ranked rows on almost every
+    // poll, so the demo/off/backoff board would flap nearly every tick for
+    // noise instead of a real rank change. A quotes-file-backed row only
+    // moves rank when its actual price moved, so real data keeps this check.
+    if (quotesFile && lastShownMarket === market) {
+      for (let i = 0; i < shown.length; i++) {
+        const before = lastShown[i]
+        if (!before || before.code === shown[i].code) continue
+        shown[i] = {
+          ...shown[i],
+          was: {
+            price: before.price,
+            change: before.change,
+            pct: before.pct,
+            code: before.code,
+            name: before.name,
+          },
+        }
+        ranksCrossed = true
+      }
+    }
+    // Bumps once per render that actually crossed a rank, not once per row,
+    // matching setPage's own single bump per page turn.
+    if (ranksCrossed) turnSeq += 1
   }
   // what setPage turns away from next time; read only at the moment of a page
   // change, so rewriting it on every render costs nothing
   lastShown = shown
+  lastShownMarket = market
 
   // Only the one symbol the chart view is showing gets bars at all: a whole
   // page of chart-length bars would be hundreds of numbers crossing into the
@@ -1379,7 +1444,17 @@ function buildProps(
   // fetched for the focused symbol (see withLiveBars) the same way the
   // built-in feed already does - until that fetch lands, the chart shows no
   // bars yet rather than a demo-walk stand-in for a real price.
-  const focusIdx = Math.max(0, Math.min(shown.length - 1, focus))
+  //
+  // `focusIdx` is looked up by CODE, not carried as a position: `shown` is
+  // freshly re-sorted every render when `cfg.sort === 'change'`, so the code
+  // a position held last render is not the code it holds this render. A
+  // stale position would follow whatever rank crossed into that slot
+  // instead of the symbol the chart is actually supposed to be following.
+  // The page-follow jump above already moved `page` onto focusCode's own
+  // page whenever the code is still in the list, so `findIndex` returning -1
+  // here means focusCode is unset or the code was removed from the list
+  // entirely - either way this falls back to position 0 via `Math.max`.
+  const focusIdx = Math.max(0, shown.findIndex(q => q.code === focusCode))
   if (view === 'chart' && shown.length > 0) {
     const q = shown[focusIdx]
     if (!usedFile && (q.bars?.length ?? 0) < CHART_BARS) {
@@ -1536,10 +1611,16 @@ let snoozedUntil = 0
 // the chart view walks the list one symbol at a time and then returns to the
 // table, so one button covers both "show me the chart" and "next symbol"
 let view: View = 'table'
-let focus = 0
+// which code the chart view is following, not which position: `shown` gets
+// re-sorted every render under `cfg.sort === 'change'`, so a position would
+// silently start following whatever rank crossed into it. undefined (never
+// focused yet) and a code that fell off the current page both resolve to
+// position 0 in buildProps (see `focusIdx`), and ui.render syncs this back
+// to whatever code buildProps actually landed on after every render.
+let focusCode: string | undefined
 // how many quotes the last drawn board held, so a posted row index can be
 // checked against something real: a Client's post is code's word, not the
-// engine's, and focus is read straight into props.quotes[focus].
+// engine's, and a pick is resolved against `lastShown`, not trusted as-is.
 let shownCount = 0
 // The band draws from a COPY of this plugin under
 // ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/, frozen at install
@@ -1556,7 +1637,29 @@ let version = ''
 let page = 0
 let pageAt = 0 // when the current page arrived, so the turn has a start time
 let lastShown: QuoteRow[] = [] // the page on the board right now
+// which market `lastShown` was drawn for. onCycle can land buildProps on a
+// different market without ever calling setPage or turnPnl (a table-to-table
+// or pnl-to-table stop on the cycle) - the rank-cross check below must not
+// compare this render's row against a DIFFERENT market's row just because
+// they share a position, or "台積電 replaced AAPL" reads as a same-market
+// rank cross and flaps a price/pct/code/name that never actually turned.
+let lastShownMarket: MarketId | undefined
 let pageFrom: QuoteRow[] | undefined // the page it turned away from
+// which market `pageFrom` was captured from - a market switch that lands
+// back on a table can still fall inside `PAGE_TURN_WINDOW_MS` with a
+// `pageFrom` snapshot from a market visited turns ago. Same guard as
+// `lastShownMarket`, for the same reason.
+let pageFromMarket: MarketId | undefined
+// when `pageFrom` was captured - kept apart from `pageAt` because autoPage
+// keeps `pageAt` perpetually recent (refreshed every poll, see autoPage)
+// whenever the view sits outside the table, so a chart-view stay of more
+// than one poll would otherwise leave `pageAt` reading "just now" while
+// `pageFrom` still holds whatever page a real turn last captured - possibly
+// several page turns and a rank-cross drift ago. `pageFromAt` only moves
+// inside `setPage`, alongside `pageFrom` itself, so the flap window below
+// always measures time since the snapshot it is actually flapping away
+// from, never since autoPage's unrelated "restart the deadline" touches.
+let pageFromAt = 0
 // bumped by a new snapshot AND by a page change: it is what tells the board to
 // start a turn, which `seq` cannot do without making the live dot lie
 let turnSeq = 0
@@ -1587,7 +1690,7 @@ let pnlScroll = 0
 let pnlPageFrom: PricedHolding[] | undefined
 let pnlPageAt = 0
 let lastPnlShown: PricedHolding[] = []
-// the pnl view's sort - lives here like `view`/`focus`, default 總損益
+// the pnl view's sort - lives here like `view`/`focusCode`, default 總損益
 // descending. Persists across a page/scroll move and a market-cycle press
 // (unlike pnlScroll, changing the SORT is not "changing the stop").
 let pnlSortKey: PnlSortKey = 'totalPnl'
@@ -1634,6 +1737,8 @@ function autoPage(now: number) {
 function setPage(next: number, now: number) {
   if (next === page) return
   pageFrom = lastShown
+  pageFromMarket = lastShownMarket
+  pageFromAt = now
   pageAt = now
   page = next
   turnSeq += 1
@@ -2385,7 +2490,12 @@ export const register: Register = on => {
 
     const cols = e.viewport?.columns ?? e.props.bodyColumns ?? 80
     const mode = modeOverride ?? config.market
-    const props = buildProps(now, config, quotesFor(pickMarket(now, mode).market, now), mode, view, focus)
+    const props = buildProps(now, config, quotesFor(pickMarket(now, mode).market, now), mode, view, focusCode)
+    // buildProps chases focusCode to whatever position it actually landed on
+    // (falling back to 0 when the code is unset, paged off, or gone from the
+    // list) - syncing it back here keeps that landing code, not a stale one,
+    // so the next onPrev/onNext step counts from the row actually on screen.
+    focusCode = props.quotes[props.focus]?.code
 
     // the trend view is the only thing that needs K bars, so it is the only
     // thing that asks for them; feedBars drops a request it already answered.
@@ -2419,6 +2529,18 @@ export const register: Register = on => {
     const onCycle = () => {
       const hasUsHoldings = holdingsFor('us', lastHoldingsFile, config).holdings.length > 0
       const nextStop = nextCycleStop({ market: props.market, pnl: props.view === 'pnl' }, hasUsHoldings)
+      // A market switch starts the table back at page 0: the two markets'
+      // page counts have no relation to each other, so carrying the old
+      // index over lands on whichever page the new market's remainder
+      // happens to wrap to, not "from the top" the way switching markets
+      // reads. Written directly like the chart view's focus-chase jump
+      // (see buildProps) rather than through setPage: `lastShownMarket`
+      // will already read the OLD market on this same render (buildProps
+      // has not run yet), so a setPage here would open a pageFrom/
+      // pageFromAt flap that pairs the new market's row 0 with whatever
+      // the old market last drew in that slot - the exact cross-market mix
+      // `pageFromMarket` exists to keep off the board.
+      if (nextStop.market !== props.market) page = 0
       modeOverride = nextStop.market
       view = nextStop.pnl ? 'pnl' : 'table'
       resetPnlScroll() // "changing the stop" always resets the pnl scroll position
@@ -2445,19 +2567,20 @@ export const register: Register = on => {
     // opens the view.
     const onTrend = () => {
       view = 'chart'
-      focus = 0
+      focusCode = props.quotes[0]?.code
       $.ui.invalidate('ui.render')
     }
     const step = (by: number) => () => {
       const n = Math.max(1, rowCount)
-      focus = (focus + by + n) % n
+      const nextPos = (props.focus + by + n) % n
+      focusCode = props.quotes[nextPos]?.code
       $.ui.invalidate('ui.render')
     }
     const onPrev = step(-1)
     const onNext = step(1)
     const onList = () => {
       view = 'table'
-      focus = 0
+      focusCode = props.quotes[0]?.code
       $.ui.invalidate('ui.render')
     }
     // Moves the scroll offset a whole PNL_PAGE_SIZE at a time, wrapping back
@@ -2523,7 +2646,7 @@ export const register: Register = on => {
                 chart draws its own title row with both already on it. */}
             {chart ? <Button key="stock-band:prev" label="◀ 上一檔" onPress={onPrev} /> : null}
             {chart ? (
-              <Button key="stock-band:next" label={`下一檔 ▶ ${focus + 1}/${rowCount}`} onPress={onNext} />
+              <Button key="stock-band:next" label={`下一檔 ▶ ${props.focus + 1}/${rowCount}`} onPress={onNext} />
             ) : null}
             {chart ? <Button key="stock-band:list" label="回清單" onPress={onList} /> : null}
             {table ? <Text> </Text> : null}
@@ -2613,7 +2736,11 @@ export const register: Register = on => {
       return next(e)
     }
     view = 'chart'
-    focus = pick
+    // `pick` is the position the board actually drew the click on - resolve
+    // it against `lastShown` (this module's record of that same drawn page)
+    // to the code sitting there, not the position itself, so a rank cross
+    // on the very next render cannot walk the chart onto some other symbol.
+    focusCode = lastShown[pick]?.code
     $.ui.invalidate('ui.render')
     return {}
   })

@@ -12,11 +12,9 @@ swaps the table for one symbol's K bars.
 **Both markets are live, each from its own source, and the footer says which.**
 Both read Yahoo's public endpoints by default (`Yahoo 即時` for the US,
 `Yahoo 延遲` for Taiwan, since Yahoo's Taiwan quotes run about twenty minutes
-behind) — no key and no account either way. Set `"twSources": ["mis"]` for a
-backup real-time route through the exchange's own intraday endpoint
-(`證交所 即時`, still no key or account), or `"twSources": ["shioaji"]` for real
-intraday ticks through a 永豐 brokerage account — the band runs the fetcher
-itself (`永豐 即時`). A market the feed cannot reach falls back to a
+behind) — no key and no account either way. Set `"twSources": ["shioaji"]` for
+real intraday ticks through a 永豐 brokerage account — the band runs the
+fetcher itself (`永豐 即時`). A market the feed cannot reach falls back to a
 deterministic sine walk off each symbol's previous close and the footer says
 `示範資料（未接 API）`, so the tag always tells you what you are looking at.
 See [The live feed](#the-live-feed).
@@ -287,12 +285,11 @@ who opens it keeps their own preference — see
 | `highlight` | `true` | highlight the biggest mover's row (single-column table only) |
 | `columns` | `"auto"` | how many symbols a row draws: `auto` = 1 when the watchlist is 5 symbols or fewer, 2 for 6 or more; `1`/`2` force it (the board still falls back to 1 if the terminal is too narrow — see [What the band shows](#what-the-band-shows)) |
 | `feed` | `"auto"` | `auto` prices whichever market is on the band; `both` keeps the other side warm; `tw`/`us` pins one; `off` = demo prices only |
-| `twSources` | `["yahoo"]` | Taiwan's routes, in preference order — the band tries the first and falls through to the next for a tick that one has nothing fresh for. `yahoo` = Yahoo, ~20 min behind Taiwan but one request whatever the list length; `mis` = 證交所 intraday, real time, a backup route; `shioaji` = 永豐 real-time ticks, the band runs the fetcher itself — see [永豐 Shioaji as that fetcher](#永豐-shioaji-as-that-fetcher). A legacy `"twSource": "x"` (a single string) still works as an alias for `["x"]`. The shipped default never includes `shioaji`/`mis` — put those in your own `~/.claude/stock-band.json` |
+| `twSources` | `["yahoo"]` | Taiwan's routes, in preference order — the band tries the first and falls through to the next for a tick that one has nothing fresh for. `yahoo` = Yahoo, ~20 min behind Taiwan but one request whatever the list length; `shioaji` = 永豐 real-time ticks, the band runs the fetcher itself — see [永豐 Shioaji as that fetcher](#永豐-shioaji-as-that-fetcher). A legacy `"twSource": "x"` (a single string) still works as an alias for `["x"]`. The shipped default never includes `shioaji` — put that in your own `~/.claude/stock-band.json` |
 | `shioaji` | `{ "python": "python3", "env": "~/.sinobon.env", "interval": 10 }` | read only when `"shioaji"` is somewhere in `twSources` — the interpreter, the env file holding `SINOBON_API_KEY`/`SINOBON_SECRET_KEY` (`~` expands to `$HOME`), and seconds between snapshots |
 | `feedMs` | `30000` | seconds between feed requests, in ms (floor 15000 — below that Yahoo answers 429; the request budget can widen it further) |
 | `pageMs` | `10000` | how long one page holds before the board turns, in ms (floor 4000; `0` turns auto-paging off and leaves `翻頁` as the only way to page). Pressing `翻頁` restarts this countdown |
 | `tw` / `us` | built-in lists | `{ code, name, prevClose }` per symbol; only `code` is required. Taiwan 上櫃 symbols need `"ex": "otc"` (e.g. 6488 環球晶) |
-| `twIndices` | TAIEX / SEMI / FINANCE / SHIPPING | which indices the footer flaps through on the Taiwan board — see [Picking your own Taiwan indices](#picking-your-own-taiwan-indices). `mis` route only |
 | `holdings` | `{ "tw": [], "us": [] }` | manual positions for the 損益 view, `{ code, qty, cost }` per holding — the recommended place to hand-write your positions; add `"holdingsSource": "config"` to make this win over a fetched `stock-holdings.json` for a market where you want your own numbers to stick — see [Holdings and the 損益 view](#holdings-and-the-損益-view) |
 
 Both built-in lists are 20 symbols, so `columns` resolves to 2 and each page
@@ -317,7 +314,7 @@ instead of the project's own `stock-band.json`:
 ```jsonc
 // ~/.claude/stock-band.json - never in a repo, one per person
 {
-  "twSources": ["shioaji", "yahoo", "mis"],
+  "twSources": ["shioaji", "yahoo"],
   "shioaji": { "python": "python3", "env": "~/.sinobon.env", "interval": 10 }
 }
 ```
@@ -353,98 +350,24 @@ instead of leaving it on demo prices until the next tick.
   again.
 - **Taiwan: Yahoo by default, same batching as the US route.** The built-in
   20-symbol list plus its index is 21 symbols, so it costs two requests a
-  tick the same way a 20-symbol US list would. Yahoo's Taiwan quotes are about
-  twenty minutes old (measured 2026-09-16: Yahoo said 10:29:05 while 證交所
-  MIS said 10:48:36).
-- **Taiwan: `"twSources": ["mis"]`, a backup real-time route through the
-  exchange, one request whatever the list length.** `mis.twse.com.tw` answers
-  the whole watchlist plus 加權指數 (`t00`) and 櫃買指數 (`o00`) in one call,
-  with the real last trade behind it, and has no 20-symbol batching cap of
-  its own. Two MIS fields need care: `z` reads `-` between trades, so the
-  last actual deal comes from `trade.z`, and 上櫃 symbols answer on the
-  `otc_` channel rather than `tse_`.
+  tick the same way a 20-symbol US list would. Yahoo's Taiwan quotes run
+  about twenty minutes behind the exchange's own tape.
 - **Taiwan: `"twSources": ["shioaji"]` for 永豐's own real-time ticks — the band
   runs the fetcher, you never touch a terminal.** See
   [永豐 Shioaji as that fetcher](#永豐-shioaji-as-that-fetcher); the built-in
-  HTTP feed (Yahoo, MIS) does not run for Taiwan on this route, only the
-  per-symbol Yahoo `chart` call the trend view already makes for K bars.
+  Yahoo feed does not run for Taiwan on this route, only the per-symbol
+  Yahoo `chart` call the trend view already makes for K bars.
 - **K bars cost extra, so they are fetched only when the chart view wants
-  them** — one request for the one symbol it is drawing. MIS carries no K
-  bars at all, so the chart view always goes to Yahoo per symbol, whichever
-  `twSources` prices the table.
+  them** — one request for the one symbol it is drawing, always through
+  Yahoo's per-symbol chart call regardless of which `twSources` route prices
+  the table.
 - **Rate limits are real.** A request with no browser `User-Agent` gets 429 on
   the first try, and the ban lasts minutes. Every non-2xx doubles the wait, up
   to 5 minutes.
 - **Repeated URLs come back cached** — measured: six ticks over 80 seconds
   returned a byte-identical body and a frozen price — so every request carries a
   `_=<timestamp>` and no-cache headers.
-## Picking your own Taiwan indices
-
-The Taiwan footer ships with four: **TAIEX** (加權指數), **SEMI** (半導體類),
-**FINANCE** (金融保險類) and **SHIPPING** (航運類) — the headline number plus
-the three sectors that move Taiwan on any given day. They rotate, 5 seconds
-each, so one lap is 20 seconds.
-
-Replace the whole list with `twIndices` in your config:
-
-```json
-{
-  "twSources": ["mis"],
-  "twIndices": [
-    { "code": "t00", "name": "TAIEX" },
-    { "code": "t24", "name": "SEMI" },
-    { "code": "TW50", "name": "TW50" },
-    { "code": "o00", "name": "TPEx", "ex": "otc" }
-  ]
-}
-```
-
-**The first entry is the headline index** — the one the rest of the band reads
-the market by. `ex` defaults to `tse`; 櫃買 (`o00`) is the one that needs
-`"ex": "otc"`.
-
-Some worth knowing about, all verified answering live on 2026-09-16:
-
-| `code` | index | why you might want it |
-| --- | --- | --- |
-| `t00` | 發行量加權股價指數 | TAIEX, the headline number |
-| `t24` | 半導體類 | the engine — says more about the day than TAIEX does |
-| `t13` | 電子工業類 | the whole electronics board, a layer wider than semis |
-| `t17` | 金融保險類 | often moves against electronics; the pair tells you rotation from rally |
-| `t15` | 航運類 | volatile, so it reads as a sentiment gauge |
-| `t25` | 電腦及週邊設備類 | the AI-server names (廣達, 華碩) |
-| `TW50` | 臺灣50 | what 0050 tracks |
-| `TWDP` | 臺灣高股息 | the benchmark behind the dividend ETFs |
-| `TWMC` | 臺灣中型100 | mid caps — life without TSMC |
-| `t003` | 未含金融電子 | drop both heavyweights and see how everyone else did |
-| `FRMSA` | 寶島股價 | 上市 + 上櫃 together, the only whole-market number |
-| `o00` | 櫃買指數 | TPEx (needs `"ex": "otc"`) |
-
-That is a shortlist. The exchange publishes **146 index channels** and this
-route can read any of them — ask it for the full list yourself:
-
-```sh
-curl -s -H 'User-Agent: Mozilla/5.0' -H 'Referer: https://mis.twse.com.tw/stock/index.jsp' \
-  'https://mis.twse.com.tw/stock/api/getCategory.jsp?ex=tse&i=TIDX' | python3 -m json.tool
-```
-
-Three things to know before you go long:
-
-- **They are free, but the footer's time is not.** MIS answers every index on
-  the same request as the quotes, so ten indices cost exactly what two do —
-  zero extra requests. But at 5 seconds a row, ten of them is a 50-second lap
-  before TAIEX comes back around. Three to five is the useful range.
-- **Names must be Latin.** The board flaps a row one character at a time, and a
-  Chinese character has no drum to riffle through, so `半導體` would sit there
-  unable to turn. Give it `SEMI`.
-- **`mis` only.** Yahoo has no Taiwan sector indices — the Yahoo route shows
-  TAIEX alone, and even that disagrees with the exchange: on 2026-09-16 Yahoo's
-  `^TWII` reported the previous close as 45,862.5 against the exchange's
-  45,511.49, which turned a +337 point day into −13.6 on the band. If the
-  Taiwan footer matters to you, set `"twSources": ["mis"]`.
-
-A code the exchange does not recognise simply answers nothing and that row is
-left out, so a typo costs one missing index rather than the whole footer.
+## The footer animation
 
 - **The footer is a Solari split-flap board.** `^DJI`, `^GSPC` and `^IXIC` ride
   the same batched request as the quotes, so all three cost nothing extra. Each
@@ -466,8 +389,8 @@ left out, so a typo costs one missing index rather than the whole footer.
     `ui.render` calls (measured: 10 in 16 seconds, the same 3-second poll as
     without it).
   - Index names are Latin (`DOW`, not 道瓊) because a Chinese character has no
-    drum to riffle through. A market with one index (Taiwan on `mis`) never
-    flaps.
+    drum to riffle through. A market with one index (Taiwan, by default)
+    never flaps.
 - **The quote rows turn on every update too.** When a snapshot lands, each row
   whose price moved turns its numbers with the same front, and rows lag each
   other so the board turns top to bottom. A row that did not move does not
@@ -581,7 +504,7 @@ fetches every 30 seconds. A long-lived script writing the override file is the
 shape that fits; `twSources: ["shioaji"]` is the band running that same shape
 itself instead of asking you to.
 
-What it buys you over the built-in 證交所 route: 永豐 quotes come with the
+What it buys you over the built-in Yahoo route: 永豐 quotes come with the
 broker's own 昨收 reference (so 漲跌 stays right through an ex-dividend date),
 they resolve 上市/上櫃 themselves (no `"ex": "otc"` needed), and the account is
 already there if you trade through it. What it costs: credentials, a Python
@@ -592,8 +515,8 @@ Two things measured while wiring it up (2026-09-16):
 - **Its timestamps are Taipei wall-clock counted as UTC.** A snapshot taken at
   10:55 comes back as an epoch that reads 18:55, exactly 8 hours ahead. The
   script subtracts it; anything else reading `snapshot.ts` has to as well.
-- `snapshot.close` is the last trade and never `-`, unlike the exchange
-  endpoint's `z`, so there is no between-trades hole to patch.
+- `snapshot.close` is the last trade and never `-`, so there is no
+  between-trades hole to patch.
 
 The source inventory — which endpoints exist for each market, what each one
 costs and what was actually measured — is in
@@ -668,7 +591,7 @@ resets the scroll position back to the top.
   `永豐 庫存` into a project-path file by hand — that label is reserved for
   `scripts/fetch-quotes-shioaji.py`'s own output, and a hand-written file
   carrying it reads as a stale copy of the fetcher's legacy (pre-runtime-dir)
-  output and gets ignored (see `references/quote-sources.md` §6). If you use
+  output and gets ignored (see `references/quote-sources.md` §5). If you use
   this file, add `.claude/stock-holdings.json` to your `.gitignore`.
 - **Do not hand-write** `~/.claude/stock-band/<project slug>/stock-holdings.json`
   — that is 永豐's fetcher output, rewritten every tick, and the band never

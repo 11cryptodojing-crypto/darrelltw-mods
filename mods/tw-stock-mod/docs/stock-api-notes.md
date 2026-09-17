@@ -1,24 +1,23 @@
 # 股價來源盤點（cc-stock-band 接 API 的規劃）
 
-> 📍 **要選報價來源、接證交所／永豐／自己的 fetcher，看
+> 📍 **要選報價來源、接永豐／自己的 fetcher，看
 > [`mods/cc-stock-band/references/quote-sources.md`](../mods/cc-stock-band/references/quote-sources.md)。**
 > 這份筆記是那個選擇背後的證據——每個端點、每個數字、每個踩過的坑都留在這裡，
 > 但不是「現在該接哪個」的入口，那份 reference 才是。
 
 > 🔴 **2026-09-16 更新：兩邊都接上了，Yahoo 是兩個市場的預設。** 現況的 source
-> of truth 是文末 **§6（美股／Yahoo，2026-09-15）** 與 **§7（台股／MIS 與
-> Yahoo，2026-09-16）**。§1-§5 保留當作來源盤點，但 §1 的架構結論已經作廢
-> （hooks 模組有 `$.http.fetch`，不需要外部 fetcher）。
+> of truth 是文末 **§6（美股／Yahoo，2026-09-15）** 與 **§7（台股批次補測，
+> 2026-09-16）**；台股當前實作細節見上面連結的 reference。§1-§5 保留當作來源
+> 盤點，但 §1 的架構結論已經作廢（hooks 模組有 `$.http.fetch`，不需要外部
+> fetcher）。
 
 現況：**兩個市場都由 hooks 模組自己抓，預設都是 Yahoo**（免金鑰、台美一支
-API 搞定）。台股要盤中真即時，設定檔加一行 `"twSource": "mis"` 就切去證交所；
-永豐 Shioaji 與其他券商／付費行情走 `.claude/stock-quotes.json` 這個 override
-檔案接縫（見 §8、§9）。
+API 搞定）。台股要盤中真即時，接永豐 Shioaji（見 §8）；其他券商／付費行情走
+`.claude/stock-quotes.json` 這個 override 檔案接縫（見 §9）。
 
 > ⚠️ §1-§5 的驗證狀態：這些端點是在更早的 session 盤點的，當時對外連線走政策代理，
-> `mis.twse.com.tw` / `openapi.twse.com.tw` / `query1.finance.yahoo.com` 的 CONNECT
-> 都被 gateway 回 403（組織政策拒絕，不是端點壞掉），所以**沒有實測過**。
-> 2026-09-15 在本機重測的結果以 §6 為準。
+> 這幾支端點的 CONNECT 都被 gateway 回 403（組織政策拒絕，不是端點壞掉），
+> 所以**沒有實測過**。2026-09-15 在本機重測的結果以 §6 為準。
 
 ## 1. ~~架構決定：API 不要寫在 hooks 模組裡~~（已作廢，見 §6）
 
@@ -51,17 +50,17 @@ band（hooks/register.tsx → hooks/board.tsx）
 
 | 來源 | 端點 / 方式 | 認證 | 即時性 | 備註 |
 | --- | --- | --- | --- | --- |
-| **證交所 MIS**（首選） | `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_2330.tw\|tse_0050.tw&json=1&delay=0` | 無 | 盤中約 5 秒快照 | 官方盤中揭示用的同一支。上市 `tse_`、上櫃 `otc_`；加權指數 `tse_t00.tw`。回傳 `msgArray[]`：`z` 成交價（無成交時是 `-`）、`y` 昨收、`o/h/l`、`v` 量、`t`/`tlong` 時間。`ex_ch` 可一次串多檔，適合 5 檔一次抓完。要帶一般瀏覽器 UA，呼叫間隔 ≥5 秒，別打太兇。 |
-| 證交所 OpenAPI | `https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_AVG_ALL`、`.../BWIBBU_ALL`、`.../MI_INDEX` | 無 | **日頻**（收盤後） | 官方、穩定、有 swagger。當「昨收 / 收盤價」基準很好用，不能當盤中報價。 |
-| 證交所日成交 | `https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?date=20260901&stockNo=2330&response=json` | 無 | 日頻 | 單檔歷史，補 `prevClose` 用。 |
+| 台灣證券交易所 OpenAPI | `https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_AVG_ALL`、`.../BWIBBU_ALL`、`.../MI_INDEX` | 無 | **日頻**（收盤後） | 官方、穩定、有 swagger。當「昨收 / 收盤價」基準很好用，不能當盤中報價。 |
+| 台灣證券交易所日成交 | `https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?date=20260901&stockNo=2330&response=json` | 無 | 日頻 | 單檔歷史，補 `prevClose` 用。 |
 | 櫃買中心 OpenAPI | `https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes` | 無 | 日頻/延遲 | 只有上櫃需要。目前 5 檔都是上市，用不到。 |
 | FinMind | `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=2330&start_date=...` | 免費 token（有額度） | 日頻為主 | 歷史/回測方便，盤中不建議。 |
 | 富果 Fugle | `https://api.fugle.tw/marketdata/v1.0/stock/intraday/quote/2330`（`X-API-KEY`） | 需申請（富果帳戶） | **真即時**，有 WebSocket | 想要秒級更新就走這條。 |
 | 永豐 Shioaji | Python SDK | 需券商帳號＋憑證 | 真即時 tick | 重裝備，band 用不到這麼重。 |
 | Yahoo Finance（非官方） | `https://query1.finance.yahoo.com/v8/finance/chart/2330.TW?interval=1m&range=1d` | 無 | 約 15 分延遲 | 好處是**台美一支搞定**（`2330.TW`、`0050.TW`、`006208.TW`、`NVDA`）。`meta.regularMarketPrice` / `meta.chartPreviousClose` 就是我們要的兩個數。非官方 API，會變、會 429。 |
 
-結論：**台股有免費可用的即時來源** → MIS 當主力（免金鑰、5 秒、可一次多檔），
-昨收/收盤用 OpenAPI 或 MIS 的 `y` 欄位，要更快再換 Fugle。
+結論：**台股有免費可用的來源** → Yahoo 當主力（免金鑰、台美一支搞定，但台股
+落後約 20 分鐘），昨收/收盤用 OpenAPI 或 Yahoo 的 `meta.previousClose`，要更
+即時就換永豐或富果。
 
 ## 3. 美股候選
 
@@ -86,21 +85,20 @@ sparkline 只需要收盤價序列（20 點）。上面那些「即時報價」�
 | --- | --- | --- | --- |
 | **Yahoo chart**（最省事） | `https://query1.finance.yahoo.com/v8/finance/chart/2330.TW?interval=5m&range=1d` | 1m/5m/15m/1d | `timestamp[]` 搭 `indicators.quote[0].{open,high,low,close}`，直接對上 `bars`。台美同一支、免金鑰，但非官方、約 15 分延遲。第一版建議走這條。 |
 | 富果 Fugle | `/marketdata/v1.0/stock/historical/candles/{symbol}?timeframe=5` | 1/5/10/30/60 分、日 | 台股真即時 K，需金鑰。 |
-| 證交所 STOCK_DAY | `https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?date=...&stockNo=2330&response=json` | **日 K** | 官方，但盤中畫不出當日走勢。 |
-| 證交所 MIS | 同 §2 | 無 | 只有當下快照。要盤中 K 就得自己每 5 秒取樣、自己聚合成 5 分 K（fetcher 保留自己的歷史檔即可）。 |
+| 台灣證券交易所 STOCK_DAY | `https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?date=...&stockNo=2330&response=json` | **日 K** | 官方，但盤中畫不出當日走勢。 |
 | FinMind | `dataset=TaiwanStockPrice`（日）／分 K 與 tick 在較高方案 | 日／分 | 免費額度以日 K 為主。 |
 | Twelve Data | `time_series?symbol=NVDA&interval=5min` | 1/5/15/30/60 分、日 | 美股 K 棒免費額度可用（800/day）。 |
 | Polygon | `/v2/aggs/ticker/NVDA/range/5/minute/...` | 任意聚合 | 免費延遲 15 分、5 req/min。 |
 | Finnhub | `/stock/candle` | 分/日 | ⚠️ 免費方案對 candle 端點的開放狀況會變，接之前先用自己的 token 打一次確認；`/quote`（現價）不受影響。 |
 
-實務上最順的組合：**現價走 MIS（台股）/ Finnhub（美股），K 棒走 Yahoo chart 或
+實務上最順的組合：**現價走 Yahoo（台股）/ Finnhub（美股），K 棒走 Yahoo chart 或
 富果**；fetcher 兩邊都寫進同一個 `stock-quotes.json`（`price` 用即時的、`bars` 用
 K 棒來源的），band 不需要知道它們來自不同地方。
 
 ## 4. 建議的第一版實作
 
 1. `scripts/fetch-quotes.py`（還沒寫）：讀 `.claude/stock-band.json` 的清單 →
-   台股打 MIS 一次抓 5 檔＋`tse_t00.tw` 指數；美股打 Finnhub（或先用 Yahoo 免金鑰版）
+   台股打 Yahoo spark 一次抓清單＋加權指數；美股打 Finnhub（或先用 Yahoo 免金鑰版）
    → 寫 `.claude/stock-quotes.json`。趨勢圖要的 `bars` 頻率低很多（每檔 1-5 分鐘
    更新一次就夠），跟現價分開排程，別每 10 秒重抓一次 K 棒。
 2. 只在該市場開盤時抓（開盤判斷的規則已經在 `register.tsx`：
@@ -109,15 +107,11 @@ K 棒來源的），band 不需要知道它們來自不同地方。
 3. 抓價失敗就**不要動** `stock-quotes.json`：120 秒後 band 自己退回示範資料，
    不會在畫面上留下一個假裝是即時的舊價格。
 4. 還缺的：台股假日行事曆（現在只判斷週一到週五，`phaseOf()` 有標 PROTOTYPE LIMIT）。
-   證交所有「開休市日期」開放資料可以之後補。
+   台灣證券交易所有「開休市日期」開放資料可以之後補。
 
 ## 5. 自己機器上的驗證指令
 
 ```sh
-# 台股即時（應該回 rtcode 0000 + msgArray）
-curl -sS -A 'Mozilla/5.0' \
-  'https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_2330.tw|tse_0050.tw|tse_006208.tw|tse_t00.tw&json=1&delay=0' | head -c 800
-
 # 台股官方日頻
 curl -sS 'https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_AVG_ALL' | head -c 300
 
@@ -211,7 +205,6 @@ Yahoo 這幾支是**沒有官方文件**的內部端點，也沒有官方公布�
 | 來源 | 結論 |
 | --- | --- |
 | **Yahoo（現用）** | 台美一支搞定。實測台股符號也通：`2330.TW` / `0050.TW` / `^TWII` 都回得來，所以之後接台股是加後綴的事，不用換來源。風險是非官方端點，會改格式、可能哪天要 cookie+crumb。 |
-| 證交所 MIS | 台股官方、免金鑰、約 5 秒快照。但 2026-09-15 深夜（台灣時間）打過去 **timeout**，看起來只在盤中前後開；同 session 稍早盤中是通的。 |
 | **Finnhub** | ❌ **當不了備選。** 官方帳號在自家 repo 明講 free plan **從來沒有**開放 `/stock/candle`（[#546](https://github.com/finnhubio/Finnhub-API/issues/546)），所以 sparkline 和 K 棒全都拿不到，只剩一個現價數字。而且 `/quote` 不能批次（5 檔＝5 個請求，Yahoo 是 1 個），免費 60 calls/min 換算下來最快只能 6 秒一輪。免費版只有美股（[#397](https://github.com/finnhubio/Finnhub-API/issues/397)）。唯一勝過 Yahoo 的地方：它是有文件的正式 API。 |
 | Shioaji | ❌ 只有台灣市場，合約種類 STK/FUT/OPT/IND/WRT，交易所 TSE/OTC/TAIFEX。**沒有美股、沒有海外期貨**（[官方 tutor](https://sinotrade.github.io/tutor/contract/)）。永豐的複委託是券商業務，這支 API 沒開。且需券商帳號＋憑證，本機沒設定。 |
 | Stooq | ❌ 走不通，報價 CSV 端點 `https://stooq.com/q/l/?s=nvda.us&f=sd2t2ohlcv&h&e=csv` 回 404。 |
@@ -297,84 +290,12 @@ $ curl '.../v7/finance/spark?symbols=<21 個代號>&range=1d&interval=5m'
 結束時還原）。
 
 
----
+### 7.3 台股批次與已知坑（Yahoo）
 
-## 7. 台股已實作（2026-09-16 實測）
-
-### 7.1 為什麼是 MIS 不是 Yahoo
-
-兩支都免金鑰、都能一次抓多檔，差別是**新鮮度**。同一個時刻同時打兩邊：
-
-| 來源 | 2330 價格 | 時戳 |
-| --- | --- | --- |
-| 證交所 MIS | 2380（`trade.z`） | 10:48:35 |
-| Yahoo spark `2330.TW` | 2385 | 10:29:05 |
-
-Yahoo 的台股報價**落後約 20 分鐘**，MIS 才是盤中真即時——這是 MIS 這條路線
-存在的理由，band 右下角寫「即時」就得是即時。兩個市場的預設值後來改回
-Yahoo（取捨見 [references/quote-sources.md](../mods/cc-stock-band/references/quote-sources.md)），
-所以現在是反過來：Yahoo 預設、`twSource: "mis"` 一行設定切去 MIS 換真即時，
-代價是失去 MIS 沒有的當日 5 分鐘收盤序列。這裡量到的新鮮度差距沒有變。
-
-### 7.2 端點與請求數
-
-| 用途 | 端點 | 一次要幾個請求 |
-| --- | --- | --- |
-| 現價＋昨收＋加權／櫃買指數 | `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_2330.tw\|otc_6488.tw\|tse_t00.tw\|otc_o00.tw&json=1&delay=0` | **1 個**（清單＋兩個指數一次打包，MIS 沒有 20 檔上限） |
-| sparkline 用的當日序列 | Yahoo spark（同 §6.2） | 只有 `trend: "spark"` 才打，1 個 |
-| K 棒 | Yahoo chart `2330.TW` / `6488.TWO` | 每檔 1 個，round-robin |
-
-指數：加權 `tse_t00.tw`、櫃買 `otc_o00.tw`，兩個都在同一個請求裡，多抓不用多打。
-⚠️ **Yahoo 的 `^TWOII`（櫃買）回的是 2024-10-12 的收盤、序列長度 0**，不能用；
-Yahoo 路線因此只有 `^TWII` 一個指數。
-
-### 7.3 三個會讓你以為壞掉的坑（都實測過）
-
-1. 🔴 **`z`（成交價）在「這一刻沒成交」時是 `-`，不是 0 也不是舊價。**
-   實測盤中 10:48，2330 跟 2317 的 `z` 都是 `-`。最後一筆真正的成交在
-   `trade.z`；連 `trade` 都沒有（今天還沒成交）才退到 `o`（開盤）、`y`（昨收）。
-   只讀 `z` 會讓整排價格變成空白。
-2. **上櫃要走 `otc_` 頻道**：`tse_6488.tw` 查不到，要 `otc_6488.tw`（Yahoo 那邊
-   對應 `6488.TWO`）。代號本身看不出上市上櫃，所以設定檔的 symbol 多了
-   `"ex": "otc"`。
-3. **MIS 每個欄位都是字串**（`"2380.0000"`），而且是多節點負載平衡：
-   不帶 cache-buster 連打兩次，第二次的 `tlong` 可能**比第一次舊**（實測
-   ...718000 → ...695000）。一樣要帶 `_=<timestamp>`。
-
-### 7.4 速率限制（2026-09-16 實測）
-
-**證交所沒有公布任何限制**，這支端點根本沒有被當成公開 API 文件化（它是
-mis.twse.com.tw「基本市況報導」網頁自己在打的）。回應裡**也沒有任何 rate-limit
-標頭**可讀，只有 `Cache-Control: no-store` 和一個 `JSESSIONID` cookie。
-
-實測（盤中、台北時間）：**1 秒間隔連打 8 次，全部 200、`rtcode=0000`**，
-加上接這條線前後總共約 20 幾個請求，一次都沒被擋。
-
-⚠️ 網路上流傳的「5 秒內不超過 3 個請求」**查不到一手出處**：引用那個數字的頁面
-原文只寫「把多檔併成一個請求以免被證交所封 IP」，沒給任何數字。不要拿它當依據。
-
-**沒有再往上加壓找真正的門檻**——要問出門檻只能把 IP 打到被封，而 band 正在用
-這條線。社群共識的安全線是「間隔 ≥5 秒、帶瀏覽器 UA、多檔併一個請求」，
-三條都有做到。band 預設 30 秒一次、一次一個請求（每小時 120 個），離得很遠。
-
-程式這邊跟 Yahoo 共用 `REQUESTS_PER_HOUR = 300` 的預算（`feedInterval()` 會依
-「一次 tick 幾個請求」把間隔撐開），所以 `feed: "both"` ＋ 20 檔美股 ＋ K 棒
-（4 請求／tick）會自動把間隔撐到 48 秒。
-
-### 7.5 設定
-
-```jsonc
-{
-  "feed": "auto",       // auto=只抓畫面上那個市場（預設）/ both / tw / us / off
-  "twSource": "yahoo",  // yahoo=約 20 分延遲但有序列（預設）/ mis=證交所即時，一行切換
-  "tw": [
-    { "code": "2330", "name": "台積電" },
-    { "code": "6488", "name": "環球晶", "ex": "otc" }
-  ]
-}
-```
-
-`feed: "auto"` 下按 `m` 換市場會**立刻發一次請求**，不會停在示範資料等下一個 tick。
+台股 spark 一樣能把清單＋加權指數包進同一個請求（見 §6.2）；`^TWII`（加權指數）
+沒問題，但 **`^TWOII`（櫃買指數）回的是 2024-10-12 的收盤、序列長度 0，不能用**
+（2026-09-16 實測）——台股指數目前只能顯示 `^TWII` 一個。K 棒一樣走 Yahoo chart，
+每檔 1 個請求、round-robin。
 
 
 ---
@@ -397,7 +318,7 @@ Hello from shioaji!
 
 ### 8.2 為什麼不直接接進 hooks 模組
 
-MIS 跟 Yahoo 是「一個 HTTP GET 就有價格」，`$.http.fetch` 直接打。Shioaji 不是：
+Yahoo 是「一個 HTTP GET 就有價格」，`$.http.fetch` 直接打。Shioaji 不是：
 
 - 它是 Python SDK，hooks 模組跑在 JS 沙箱裡，只能用 `$.process` 去 spawn。
 - `api.login()` 要幾秒，而且會**建立並持有一個 session**（實測 login 後
@@ -414,7 +335,7 @@ MIS 跟 Yahoo 是「一個 HTTP GET 就有價格」，`$.http.fetch` 直接打�
 | --- | --- |
 | 現價／開高低／漲跌 | `api.snapshots([contract, ...])` → `close`、`open`、`high`、`low`、`change_price`、`change_rate`、`ts` |
 | 昨收（漲跌基準） | `contract.reference`（2330 實測 2380.0） |
-| 上市／上櫃 | `api.Contracts.Stocks["6488"]` **自己解析**，不必像 MIS 那樣指定 `otc_` |
+| 上市／上櫃 | `api.Contracts.Stocks["6488"]` **自己解析**，不必像其他路線那樣在設定檔標 `"ex": "otc"` |
 | 加權指數 | `api.Contracts.Indexs.TSE["IX0001"]`（發行量加權股價指數） |
 | 櫃買指數 | `api.Contracts.Indexs.OTC["IX0043"]` |
 
@@ -430,7 +351,7 @@ MIS 跟 Yahoo 是「一個 HTTP GET 就有價格」，`$.http.fetch` 直接打�
 
 ### 8.5 其他實測到的事
 
-- `snapshot.close` 就是最後成交價，**不會像 MIS 的 `z` 出現 `-`**，沒有「這一刻
+- `snapshot.close` 就是最後成交價，**不會出現 `-`**，沒有「這一刻
   沒成交」的洞要補。
 - `login(subscribe_trade=False)` 可以不訂閱委託回報，只要報價。
 - 環境：shioaji 鎖 Python ≤ 3.13。本機能跑的是本機的 venv
@@ -438,34 +359,36 @@ MIS 跟 Yahoo 是「一個 HTTP GET 就有價格」，`$.http.fetch` 直接打�
   `import` 得到但不是拿來用的。
 - `api.Contracts` 會噴 DeprecationWarning（v2 改叫 `api.contracts`），功能還在。
 
-### 8.6 跟 MIS 比，什麼時候該用哪個
+### 8.6 跟 Yahoo 比，什麼時候該用哪個
 
-| | 證交所 MIS | 永豐 Shioaji |
+| | Yahoo | 永豐 Shioaji |
 | --- | --- | --- |
 | 要不要帳號 | 不用 | 要（API 開通＋簽署中心） |
 | 怎麼跑 | hooks 模組自己抓 | 要另外跑一支常駐腳本 |
 | 上櫃 | 設定檔要標 `"ex": "otc"` | 自動 |
-| 昨收 | `y` 欄位 | `contract.reference`（券商口徑，除權息後比較準） |
-| 沒成交時 | `z` 是 `-`，要退到 `trade.z` | `close` 直接就是最後成交 |
+| 昨收 | `meta.previousClose` | `contract.reference`（券商口徑，除權息後比較準） |
+| 台股即時性 | 落後約 20 分鐘 | 真即時 tick |
 
-一般情況用 MIS 就夠；已經是永豐客戶、或要跟自己的部位／下單流程共用同一份行情，
-才值得多跑那支腳本。
+一般情況用 Yahoo 就夠；已經是永豐客戶、要盤中真即時、或要跟自己的部位／下單
+流程共用同一份行情，才值得多跑那支腳本。
 
 
 ---
 
 ## 9. 富果 Fugle 評估（2026-09-16，結論：先不接）
 
-起因：證交所 MIS 看起來不像有授權的 API，所以去查「有沒有免費又有明文條款的替代」。
+起因：想找有沒有免費、有明文使用條款的即時報價替代，而不是只能依賴沒有文件、
+沒有條款的內部端點。
 
-### 9.1 先否定一個直覺：換 Yahoo 不會比較安全
+### 9.1 先否定一個直覺：Yahoo 本身也不是安全牌
 
-Yahoo 那幾支一樣是沒有文件、沒有條款、沒有金鑰的內部端點，而且 Yahoo 自己的服務條款
-就禁止程式化取用金融資料。MIS 至少是交易所自己的公開網頁在打的同一支。換過去是
-灰色換灰色，外加台股報價倒退 20 分鐘。
+Yahoo 那幾支端點一樣沒有文件、沒有條款、沒有金鑰，而且 Yahoo 自己的服務條款
+就禁止程式化取用金融資料——找免費替代不是為了「換到比較安全的」，是想知道有
+沒有明文可查的選項。
 
-**證交所真正有文件的官方 API 做不了這件事**：`openapi.twse.com.tw` 的 swagger 實查有
-143 支端點，全部是 `exchangeReport/*` 這類收盤後日頻資料，沒有任何一支盤中即時。
+**台灣證券交易所真正有文件的官方 API 做不了這件事**：`openapi.twse.com.tw` 的
+swagger 實查有 143 支端點，全部是 `exchangeReport/*` 這類收盤後日頻資料，沒有
+任何一支盤中即時。
 
 ### 9.2 富果免費層的實際條件（實查）
 
@@ -481,7 +404,8 @@ Yahoo 那幾支一樣是沒有文件、沒有條款、沒有金鑰的內部端�
 ### 9.3 為什麼先不接
 
 沒有批次端點 → 20 檔 = 20 個請求/tick，卡在 60 次/分，**最快只能 60 秒更新一次**；
-現在證交所是一個請求抓完 20 檔、30 秒一次。用了會變慢一倍，換到的只有「條款寫得出來」。
+現在 Yahoo 一個請求抓完 20 檔、最快 24 秒一次。用了會變慢一倍以上，換到的只有
+「條款寫得出來」。
 
 ### 9.4 條款重點（`developer.fugle.tw/docs/data/intro#statement`）
 
@@ -491,19 +415,19 @@ Yahoo 那幾支一樣是沒有文件、沒有條款、沒有金鑰的內部端�
   **「將交易資訊⋯傳送予第三人」** → **plugin 不能內建金鑰、不能代抓後轉發，
   每個使用者必須自己申請自己的 key**，README 要寫清楚。
 - 「每位使用者僅限申請及使用一個帳號」，不得以多帳號規避免費限制。
-- 取得金鑰即同意遵守證交所／期交所／櫃買中心的交易資訊使用管理辦法。
+- 取得金鑰即同意遵守台灣證券交易所／期交所／櫃買中心的交易資訊使用管理辦法。
 
-### 9.5 三條路的取捨（決策當下的狀態）
+### 9.5 富果與永豐的取捨（決策當下的狀態）
 
-| | 證交所 MIS | 富果 Fugle | 永豐 Shioaji |
-| --- | --- | --- | --- |
-| 明文條款 | 沒有公布 | 有 | 券商合約 |
-| 帳號 | 不用 | 富果會員（免費） | 既有永豐帳戶 |
-| 20 檔更新一次 | 1 個請求 | 20 個請求 | 1 次 `snapshots()` |
-| 最快間隔 | 30 秒 | 60 秒 | 10 秒 |
-| 怎麼跑 | 模組自己抓 | 模組自己抓 | 常駐腳本 |
+| | 富果 Fugle | 永豐 Shioaji |
+| --- | --- | --- |
+| 明文條款 | 有 | 券商合約 |
+| 帳號 | 富果會員（免費） | 既有永豐帳戶 |
+| 20 檔更新一次 | 20 個請求 | 1 次 `snapshots()` |
+| 最快間隔 | 60 秒 | 10 秒 |
+| 怎麼跑 | 模組自己抓 | 常駐腳本 |
 
-**2026-09-16 決定：維持證交所當預設，永豐當可選（兩條都已實作）。富果先不接。**
-（這個「證交所當預設」後來改回 Yahoo，見開頭的 📍 連結；富果與永豐這兩節的
-取捨本身沒有變，只是不再是預設之爭。）
-要翻案的訊號：富果把批次快照開放到免費層，或 MIS 真的開始擋。
+**2026-09-16 決定：永豐當可選（已實作）。富果先不接。**
+（台股的預設路線後來定案為 Yahoo，見開頭的 📍 連結；富果與永豐這兩節的
+取捨本身沒有變。）
+要翻案的訊號：富果把批次快照開放到免費層，或現有免金鑰路線開始被擋。
