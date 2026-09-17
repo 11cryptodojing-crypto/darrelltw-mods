@@ -124,10 +124,13 @@ those files compiles to a call of `h`.
 
 ## Author
 
-**Darrell Wang** — 自由接案，做 Martech / AI / 自動化（GA4、GTM、n8n），寫
-自媒體，也開課教 Vibe Coding。這些 mod 是自己每天在用的東西，順手整理出來。
+**Darrell** — 這些 mod 是自己每天在用的東西，順手整理出來。
 
 - X: [@darrell_tw_](https://x.com/darrell_tw_)
+- Threads: [@darrell_tw_](https://www.threads.com/@darrell_tw_)
+- Instagram: [@darrell_tw_](https://www.instagram.com/darrell_tw_/)
+- Facebook: [darrelltw](https://www.facebook.com/darrelltw)
+- LinkedIn: [darrell-wang-tw](https://www.linkedin.com/in/darrell-wang-tw/)
 - GitHub: [@darrell-tw](https://github.com/darrell-tw)
 - Email: info@darrelltw.com
 
