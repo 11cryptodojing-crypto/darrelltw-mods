@@ -124,7 +124,7 @@ those files compiles to a call of `h`.
 
 ## Author
 
-**Darrell** — 這些 mod 是自己每天在用的東西，順手整理出來。
+**Darrell**
 
 - X: [@darrell_tw_](https://x.com/darrell_tw_)
 - Threads: [@darrell_tw_](https://www.threads.com/@darrell_tw_)
