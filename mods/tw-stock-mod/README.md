@@ -544,6 +544,9 @@ Two things measured while wiring it up (2026-09-16):
 
 ### 群益 Capital as that fetcher
 
+Contributed by [@ianyuchuang](https://github.com/ianyuchuang) in
+[#1](https://github.com/darrell-tw/darrelltw-mods/pull/1).
+
 The Windows half of the same idea. Tell Claude 「我要接群益」in a project with
 the mod installed and the `stock-quote-sources` skill walks you through it;
 the full prerequisite list lives in

@@ -270,6 +270,8 @@ the holdings file's own `price`/`prevClose`.
 
 The Windows counterpart of §3: another real-time route through a brokerage
 account you already have, for the machines Shioaji does not run on.
+Contributed by [@ianyuchuang](https://github.com/ianyuchuang) in
+[#1](https://github.com/darrell-tw/darrelltw-mods/pull/1).
 
 **What you need:**
 
