@@ -13,12 +13,12 @@ import type { Register } from 'claude-code'
 // Yahoo's Taiwan quotes run about twenty minutes behind, the tradeoff for a
 // feed that answers with one request whatever the list length.
 // `twSources` (an order of preference, e.g. `["shioaji", "yahoo"]`) tries
-// the exchange's own real-time intraday endpoint (`mis`) or 永豐's real-time
-// feed (`shioaji`) first, falling through to the next entry for a tick that
-// source has nothing fresh for; the shipped default is `["yahoo"]` alone. A
-// market the feed cannot reach at all falls back to a
-// deterministic sine walk off each symbol's previous close, and the footer
-// then says 示範資料 rather than pretending.
+// the exchange's own real-time intraday endpoint (`mis`), 永豐's real-time
+// feed (`shioaji`, macOS/Linux) or 群益's (`capital`, Windows) first, falling
+// through to the next entry for a tick that source has nothing fresh for; the
+// shipped default is `["yahoo"]` alone. A market the feed cannot reach at all
+// falls back to a deterministic sine walk off each symbol's previous close,
+// and the footer then says 示範資料 rather than pretending.
 // Machine-written quotes and holdings live under the user's home directory
 // now (see runtimeDir below), never in the project's `.claude/`. Quotes read
 // order: the runtime-dir file while it is fresh (<120s), then the project's
@@ -37,22 +37,38 @@ const HOLDINGS_PATH = '.claude/stock-holdings.json'
 // A user-level config, never inside a project (so it never lands in version
 // control): each person's own source order and broker paths live here, and
 // a shared project's stock-band.json stays neutral. `~` is resolved with
-// $.env.get("HOME") at poll time, since a path constant cannot expand it.
+// userHome() at poll time, since a path constant cannot expand it.
 const USER_CONFIG_REL = '.claude/stock-band.json'
 
-// Everything the module or the Shioaji fetcher writes at runtime - quotes,
+/**
+ * The home directory every `~` and every runtime path resolves against.
+ * `$HOME` first, `%USERPROFILE%` second: Windows does not set `HOME` for a
+ * normal process, and without the fallback runtimeDir() below would put one
+ * person's live prices and PID file inside the project's own `.claude/` -
+ * exactly what the runtime dir exists to prevent. `scripts/fetch-quotes-
+ * capital.py`'s user_home() reads the same two, in the same order.
+ */
+async function userHome($: { env: { get(name: string): Promise<string | undefined> } }): Promise<string> {
+  return (await $.env.get('HOME')) || (await $.env.get('USERPROFILE')) || ''
+}
+
+// Everything the module or a broker fetcher writes at runtime - quotes,
 // holdings, the heartbeat, the fetcher's log and its PID file - lives under
 // this directory instead of the project's `.claude/`, so a shared project
 // never picks up one person's live prices or PID file. One directory per
 // project avoids collisions: RUNTIME_DIR_ROOT plus the project path with
-// its leading "/" dropped and every remaining "/" turned into "-" (e.g.
-// `/Users/x/app` -> `Users-x-app`). `home` falls back to the project's own
-// `.claude/` only when $HOME is unset, matching how this module wrote its
-// runtime files before runtimeDir existed.
+// its leading separators dropped and every remaining separator turned into
+// "-" (e.g. `/Users/x/app` -> `Users-x-app`, `D:\app` -> `D--app`). `\` and
+// `:` count as separators alongside `/` so a Windows path becomes a legal
+// directory name; a POSIX path contains neither, so this is byte-identical
+// to the old `/`-only rule there and no existing runtime dir moves.
+// `home` falls back to the project's own `.claude/` only when neither $HOME
+// nor %USERPROFILE% is set, matching how this module wrote its runtime files
+// before runtimeDir existed.
 const RUNTIME_DIR_ROOT = '.claude/stock-band'
 function runtimeDir(home: string, project: string): string {
   if (!home) return `${project}/.claude/`
-  const slug = project.replace(/^\/+/, '').replace(/\//g, '-')
+  const slug = project.replace(/^[/\\]+/, '').replace(/[/\\:]/g, '-')
   return `${home}/${RUNTIME_DIR_ROOT}/${slug}/`
 }
 
@@ -139,7 +155,7 @@ type MarketId = 'tw' | 'us'
 type Phase = 'open' | 'closed'
 type MarketMode = 'auto' | MarketId
 /** a route the Taiwan feed can try, in the order `Config.twSources` lists them */
-type TwSourceName = 'shioaji' | 'yahoo' | 'mis'
+type TwSourceName = 'shioaji' | 'capital' | 'yahoo' | 'mis'
 type View = 'table' | 'chart' | 'pnl'
 /** how many symbols the table draws per row; "auto" picks off the page size, see effectiveColumns() */
 type ColumnMode = 'auto' | 1 | 2
@@ -542,11 +558,17 @@ type Config = {
    * script logs in, or never spawned at all; yahoo/mis: the request failed).
    * `yahoo` is one batched request, ~20 minutes behind. `mis` is 證交所's own
    * real-time snapshot, a backup route for whoever wants exchange-true
-   * intraday without a broker account. `shioaji` hands Taiwan to 永豐's
-   * real-time feed instead: the band spawns `scripts/fetch-quotes-shioaji.py`
-   * itself (see spawnShioaji below) and reads back the quotes file it
+   * intraday without a broker account. `shioaji` and `capital` hand Taiwan to
+   * a broker's own real-time feed instead: the band spawns
+   * `scripts/fetch-quotes-shioaji.py` / `scripts/fetch-quotes-capital.py`
+   * itself (see feedTwFetcher below) and reads back the quotes file it
    * writes, rather than calling an HTTP endpoint the way the other two do.
-   * The shipped default is `["yahoo"]` alone - `shioaji`/`mis` are opt-in,
+   * Those two are also platform-split, because their SDKs are: 永豐's shioaji
+   * is a POSIX-only Python package and the band spawns it with `nohup`;
+   * 群益's SKCOM is a Windows COM server. Listing the one this machine cannot
+   * run is harmless - it just never produces a fresh file, and the tick falls
+   * through to the next entry.
+   * The shipped default is `["yahoo"]` alone - the rest are opt-in,
    * and the recommended place to opt in is the user-level
    * `~/.claude/stock-band.json` (see CONFIG_PATH/USER_CONFIG below), not a
    * shared project file, since a source order is a personal preference.
@@ -571,6 +593,8 @@ type Config = {
   lists: Record<MarketId, Ticker[]>
   /** `twSources` includes `"shioaji"` only - how the band runs the fetcher script itself */
   shioaji: ShioajiConfig
+  /** `twSources` includes `"capital"` only - how the band runs the 群益 fetcher script itself */
+  capital: CapitalConfig
   /**
    * manual holdings, keyed by market - the alternative to
    * `.claude/stock-holdings.json` (which wins for whichever market it names).
@@ -592,6 +616,33 @@ type ShioajiConfig = {
   env: string
   /** seconds between snapshots the script writes */
   interval: number
+}
+
+type CapitalConfig = {
+  /** interpreter to run the script with - must be the same bitness as the registered SKCOM 元件 */
+  python: string
+  /** env file holding CAPITAL_USER_ID / CAPITAL_PASSWORD; `~` expands to the home dir */
+  env: string
+  /**
+   * the registered `SKCOM.dll`, e.g.
+   * `~/CapitalAPI/元件/x64/SKCOM.dll`. There is no sane default: 群益 ships
+   * the SDK as a zip with no install location, and the script refuses to
+   * guess rather than fail three steps later with a COM error.
+   */
+  dll: string
+  /** seconds between snapshots the script writes */
+  interval: number
+  /**
+   * the footer's index rows on this route, as SKCOM 商品代號. 群益's manual
+   * documents no index codes, so the defaults were found by dumping
+   * `SKQuoteLib_RequestStockList` and checked against the exchange's own MIS
+   * feed (2026-09-18: TSEA 47004.27 vs t00 47001.67, OTCA 409.11 vs o00
+   * 409.12). `TSE01` is NOT 加權指數 - it is 水泥類股. The script still
+   * probes each code at startup and drops what does not resolve instead of
+   * writing a zero, and `--check` prints which ones answered. `[]` turns the
+   * index board off for this route.
+   */
+  indices: { code: string; name: string }[]
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -653,6 +704,16 @@ function defaultConfig(): Config {
     countdown: true,
     lists: { tw: TW_LIST, us: US_LIST },
     shioaji: { python: 'python3', env: '~/.sinobon.env', interval: 10 },
+    capital: {
+      python: 'python',
+      env: '~/.capital.env',
+      dll: '',
+      interval: 10,
+      indices: [
+        { code: 'TSEA', name: 'TAIEX' },
+        { code: 'OTCA', name: 'TPEx' },
+      ],
+    },
     holdings: { tw: [], us: [] },
     holdingsSource: 'file',
   }
@@ -721,7 +782,24 @@ function parseJsonRecord(text: string | undefined): Record<string, unknown> | un
   }
 }
 
-const TW_SOURCE_NAMES: TwSourceName[] = ['shioaji', 'yahoo', 'mis']
+/**
+ * `capital.indices` -> the `{code, name}` rows the 群益 fetcher gets on its
+ * `--indices` flag. A row with no `code` is dropped rather than passed on as
+ * an empty symbol the SDK would silently ignore; `name` falls back to the
+ * code so the footer never flaps a blank drum.
+ */
+function parseCapitalIndices(value: unknown[]): { code: string; name: string }[] {
+  const out: { code: string; name: string }[] = []
+  for (const raw of value) {
+    const entry = asRecord(raw)
+    const code = str(entry?.code, '')
+    if (!code) continue
+    out.push({ code, name: str(entry?.name, code) })
+  }
+  return out
+}
+
+const TW_SOURCE_NAMES: TwSourceName[] = ['shioaji', 'capital', 'yahoo', 'mis']
 
 /**
  * `twSources` in preference order, or the legacy singular `twSource` as an
@@ -763,6 +841,19 @@ function parseConfigRoot(root: Record<string, unknown> | undefined): Config {
       python: str(shioaji.python, cfg.shioaji.python),
       env: str(shioaji.env, cfg.shioaji.env),
       interval: Math.max(0, num(shioaji.interval, cfg.shioaji.interval)),
+    }
+  }
+  const capital = asRecord(root.capital)
+  if (capital) {
+    cfg.capital = {
+      python: str(capital.python, cfg.capital.python),
+      env: str(capital.env, cfg.capital.env),
+      dll: str(capital.dll, cfg.capital.dll),
+      interval: Math.max(0, num(capital.interval, cfg.capital.interval)),
+      // an array present but empty means "no index rows", the same way an
+      // empty twSources means "nothing stated but yahoo" - so this only
+      // falls back to the defaults when the key is absent entirely
+      indices: Array.isArray(capital.indices) ? parseCapitalIndices(capital.indices) : cfg.capital.indices,
     }
   }
   cfg.feedMs = Math.max(FEED_MS_MIN, num(root.feedMs, cfg.feedMs))
@@ -1574,19 +1665,26 @@ let lastHoldingsFile: HoldingsFile | undefined // runtime-dir or project holding
 // instead of on every poll tick (see the poll loop's use of it below)
 let loggedLegacyProjectHoldings = false
 // whether the runtime-dir quotes file specifically (not the project
-// override) is fresh - feedTwShioaji's own health signal, set every poll
+// override) is fresh - feedTwFetcher's own health signal, set every poll
 let runtimeQuotesFresh = false
-// when spawnShioaji last ran, so it is never re-run more than once a minute
-// (see spawnShioaji's own comment for the full respawn rule)
-let lastShioajiSpawn = 0
-// true once this session has logged the "shioaji isn't pricing anything"
-// warning - logged at most once per session, see feedTwShioaji
-let shioajiWarned = false
-// when this session FIRST saw a pidfile it did not itself spawn (a prior
-// session's leftover, or a fetcher already running before this session
-// polled) - gives that discovery its own 60s grace clock instead of
-// treating it as having been alive since forever, see feedTwShioaji
-let shioajiPidSeenAt = 0
+/**
+ * Per-route spawn bookkeeping for the broker fetchers (`shioaji`,
+ * `capital`), keyed by route name because a config may list both and each
+ * gets its own clocks. See feedTwFetcher for what each field gates:
+ * - `lastSpawn`: when this session last launched that route's script, so it
+ *   is never re-launched more than once a minute.
+ * - `warned`: true once the "this route isn't pricing anything" warning has
+ *   been logged, which happens at most once per session per route.
+ * - `pidSeenAt`: when this session FIRST saw a pidfile it did not itself
+ *   spawn (a prior session's leftover, or a fetcher already running before
+ *   this session polled) - that discovery gets its own 60s grace clock
+ *   instead of being treated as having been alive since forever.
+ */
+type FetcherState = { lastSpawn: number; warned: boolean; pidSeenAt: number }
+const fetcherState: Record<string, FetcherState> = {}
+function fetcherStateFor(route: string): FetcherState {
+  return (fetcherState[route] ??= { lastSpawn: 0, warned: false, pidSeenAt: 0 })
+}
 // the feed's last good snapshot per market, with the one before it for the
 // turn. Keyed by market because a snapshot must never reach the other board:
 // US prices under 加權指數 would be worse than no prices at all.
@@ -1933,10 +2031,10 @@ export const register: Register = on => {
     }
 
     // resolved once per session: `~` in a config path only ever means this
-    const home = (await $.env.get('HOME')) ?? ''
+    const home = await userHome($)
     const userConfigPath = home ? `${home}/${USER_CONFIG_REL}` : ''
     // Resolved once per session, same as userConfigPath: every runtime file
-    // this module or the Shioaji fetcher writes lives under `runtime`.
+    // this module or a broker fetcher writes lives under `runtime`.
     const project = await $.session.cwd()
     const runtime = runtimeDir(home, project)
 
@@ -2223,18 +2321,50 @@ export const register: Register = on => {
     }
 
     /**
-     * `"shioaji"` in `twSources`: spawn (or re-check) the fetcher script
-     * rather than call an HTTP endpoint - see the ShioajiConfig doc comment
-     * for why this cannot run inside the hooks module directly. Returns
+     * What one broker-fetcher route (`shioaji`, `capital`) needs in order to
+     * be spawned and watched. Everything that differs between them lives
+     * here; feedTwFetcher below holds the one copy of the heartbeat, respawn
+     * and visible-failure rules they share.
+     */
+    type FetcherSpec = {
+      /** the `twSources` name, and the key its spawn bookkeeping lives under */
+      route: TwSourceName
+      /** what a warning calls this route, in the band's own language */
+      label: string
+      /** the interpreter, and the script under the plugin root it runs */
+      python: string
+      script: string
+      /** flags beyond the ones every fetcher takes (see feedTwFetcher) */
+      extraArgs: string[]
+      /** seconds between snapshots, passed straight through as --interval */
+      interval: number
+      /** where this route's output and its pid live, both inside the runtime dir */
+      logPath: string
+      pidPath: string
+      /**
+       * Wraps the finished argument list in whatever makes the script
+       * OUTLIVE this call. `$.process.run` is one-shot and waits for the
+       * child's stdout/stderr pipes to close as well as its exit, and a
+       * long-lived daemon's pipes never close on their own - so each route
+       * needs its own way to hand the real work to a process this call is
+       * not attached to. See each spec below for which trick it uses.
+       */
+      wrap: (args: string[]) => string[]
+    }
+
+    /**
+     * A `twSources` entry backed by a spawned script rather than an HTTP
+     * endpoint - see the ShioajiConfig/CapitalConfig doc comments for why
+     * neither SDK can run inside the hooks module directly. Returns
      * whether the runtime-dir quotes file is fresh (true = this tick is
      * covered, same convention as feedTwYahoo/feedTwMis): the script writes
-     * that file asynchronously, on its own schedule, so "did shioaji price
+     * that file asynchronously, on its own schedule, so "did this route price
      * Taiwan just now" can only ever mean "is the file it wrote still
      * fresh", never "did a request this module made just now succeed". This
      * checks the runtime-dir file specifically, never the project's
      * `.claude/stock-quotes.json` override - that file can stay fresh for
-     * reasons that have nothing to do with shioaji, and must never mask a
-     * dead fetcher from either this respawn check or the visible-failure
+     * reasons that have nothing to do with the fetcher, and must never mask a
+     * dead one from either this respawn check or the visible-failure
      * warning below.
      *
      * Respawn rule: once at session start (the first feed tick), then only
@@ -2242,57 +2372,55 @@ export const register: Register = on => {
      * it) AND the last spawn attempt was more than 60s ago - so a script
      * that is merely slow to log in is never spawned a second time on top of
      * itself, and a script that died is retried at most once a minute.
+     *
+     * Both routes share one heartbeat file and one quotes file, which is why
+     * listing both in `twSources` is pointless rather than harmful: whichever
+     * one this machine can actually run wins, and the other never writes.
      */
-    const feedTwShioaji = async (now: number): Promise<boolean> => {
+    const feedTwFetcher = async (now: number, spec: FetcherSpec): Promise<boolean> => {
+      const state = fetcherStateFor(spec.route)
       const heartbeatPath = `${runtime}stock-band.heartbeat`
-      // Written every tick the Shioaji route is wanted, whether or not this
-      // call ends up spawning - it is the signal the script watches: it
-      // exits by itself once the heartbeat is older than 90s (band closed,
-      // or moved to the US board), so a session that stops asking for
-      // Taiwan prices does not leave the script running forever.
+      // Written every tick this route is wanted, whether or not this call
+      // ends up spawning - it is the signal the script watches: it exits by
+      // itself once the heartbeat is older than 90s (band closed, or moved
+      // to the US board), so a session that stops asking for Taiwan prices
+      // does not leave a broker login running forever.
       try {
         await $.fs.write(heartbeatPath, String(now))
       } catch (err) {
-        $.ui.log(`tw-stock-mod: could not write the shioaji heartbeat: ${err}`)
+        $.ui.log(`tw-stock-mod: could not write the ${spec.route} heartbeat: ${err}`)
       }
-
-      const expand = (p: string) => (home && p.startsWith('~') ? home + p.slice(1) : p)
-      const python = expand(config.shioaji.python)
-      const env = expand(config.shioaji.env)
-      const script = `${$.plugin.root}/scripts/fetch-quotes-shioaji.py`
-      const logPath = `${runtime}stock-shioaji.log`
-      const pidPath = `${runtime}stock-shioaji.pid`
 
       // Visible failure: a script that spawned (or is already running, per
       // its own pidfile) but still has not produced a fresh runtime-dir
       // quotes file 60s later is a failure the session should hear about
       // once, not a silent fallthrough to the next configured source.
-      if (!shioajiWarned && !runtimeQuotesFresh) {
-        let alive = lastShioajiSpawn > 0
+      if (!state.warned && !runtimeQuotesFresh) {
+        let alive = state.lastSpawn > 0
         if (!alive) {
           try {
-            await $.fs.read(pidPath)
+            await $.fs.read(spec.pidPath)
             alive = true
-            if (!shioajiPidSeenAt) shioajiPidSeenAt = now
+            if (!state.pidSeenAt) state.pidSeenAt = now
           } catch {
             alive = false
-            shioajiPidSeenAt = 0
+            state.pidSeenAt = 0
           }
         }
         // Own spawn: age from when this session actually launched it. A
-        // pidfile this session did not spawn (shioajiPidSeenAt): age from
-        // first discovery, not from now-lastShioajiSpawn (0 => Infinity),
+        // pidfile this session did not spawn (state.pidSeenAt): age from
+        // first discovery, not from now-state.lastSpawn (0 => Infinity),
         // so a leftover pidfile gets the same 60s grace as a fresh spawn
         // instead of warning on the very first tick.
-        const spawnAge = lastShioajiSpawn
-          ? now - lastShioajiSpawn
-          : shioajiPidSeenAt
-            ? now - shioajiPidSeenAt
+        const spawnAge = state.lastSpawn
+          ? now - state.lastSpawn
+          : state.pidSeenAt
+            ? now - state.pidSeenAt
             : Infinity
         if (alive && spawnAge >= 60_000) {
-          shioajiWarned = true
+          state.warned = true
           $.ui.log(
-            `tw-stock-mod: 永豐路線沒有出價，退回下一個來源。看 ${logPath}，或跑 ${python} ${script} --check 找原因`,
+            `tw-stock-mod: ${spec.label}路線沒有出價，退回下一個來源。看 ${spec.logPath}，或跑 ${spec.python} ${spec.script} --check 找原因`,
           )
         }
       }
@@ -2300,65 +2428,51 @@ export const register: Register = on => {
       const stale = !runtimeQuotesFresh
       if (!stale) return true
 
-      if (!lastShioajiSpawn || now - lastShioajiSpawn >= 60_000) {
-        lastShioajiSpawn = now
+      if (!state.lastSpawn || now - state.lastSpawn >= 60_000) {
+        state.lastSpawn = now
         try {
-          // `nohup ... >>log 2>&1 &`, wrapped in `/bin/sh -c`, is what lets
-          // $.process.run resolve at all: run() is one-shot and waits for
-          // the child's stdout/stderr pipes to close as well as its exit,
-          // and a long-lived daemon's pipes never close on their own.
-          // Redirecting them to the log file gives the wrapper's OWN
-          // short-lived pipes something to close immediately - `&`
-          // backgrounds the real script before that happens, so run() sees
-          // the wrapper exit at once while the script keeps going past it,
-          // logging to logPath instead of to a pipe nothing is reading.
+          // Whichever wrapper spec.wrap adds, it resolves with exitCode 0
+          // whether or not the DETACHED script itself goes on to fail
+          // (missing python, missing env file, a bad login) - that failure
+          // happens after the wrapper has already returned, so this
+          // try/catch can only ever catch a failure to launch the wrapper,
+          // never a failure inside the job it left running. The only signal
+          // this module can observe for "the script isn't feeding the file"
+          // is the file staying stale, which is exactly what returning false
+          // does: the dispatcher below falls through to the next source.
           //
-          // This also means the wrapper resolves with exitCode 0 whether or
-          // not the BACKGROUNDED script itself goes on to fail (missing
-          // python, missing env file, a bad login) - that failure happens
-          // after `sh -c` has already returned, so this try/catch can only
-          // ever catch a failure to launch the shell itself, never a
-          // failure inside the detached job. The only signal this module
-          // can observe for "the script isn't feeding the file" is the file
-          // staying stale, which is exactly what returning false does: the
-          // dispatcher below falls through to the next configured source.
           // --codes is the band's own effective Taiwan watchlist (built-in
           // list included, not just whatever `stock-band.json` overrides) -
           // without it the script fell back to reading `tw` out of
           // stock-band.json itself, which is empty whenever a project has no
           // config file at all, and it then snapshotted only the account's
           // positions: every OTHER watchlist row stayed on a demo price
-          // while the footer still said 永豐 即時. Passing the codes here is
-          // what makes the script price the same list the table draws.
+          // while the footer still claimed a live broker feed. Passing the
+          // codes here is what makes the script price the list the table draws.
           const codes = config.lists.tw.map(t => t.code).join(',')
           await $.process.run(
-            [
-              '/bin/sh',
-              '-c',
-              `nohup "$0" "$@" >>"${logPath}" 2>&1 &`,
-              python,
-              script,
+            spec.wrap([
               '--project',
               project,
               '--out-dir',
               runtime,
-              '--env',
-              env,
               '--interval',
-              String(config.shioaji.interval),
+              String(spec.interval),
               '--codes',
               codes,
               '--heartbeat',
               heartbeatPath,
               '--pidfile',
-              pidPath,
-            ],
+              spec.pidPath,
+              ...spec.extraArgs,
+            ]),
             { cwd: project, timeoutMs: 15000 },
           )
         } catch (err) {
-          // The shell itself failed to launch (e.g. no /bin/sh) - logged,
-          // but not fatal: returning false lets the dispatcher fall through.
-          $.ui.log(`tw-stock-mod: shioaji spawn failed (${err})`)
+          // The wrapper itself failed to launch (e.g. no /bin/sh, or a
+          // python that is not on PATH) - logged, but not fatal: returning
+          // false lets the dispatcher fall through.
+          $.ui.log(`tw-stock-mod: ${spec.route} spawn failed (${err})`)
         }
       }
 
@@ -2372,6 +2486,73 @@ export const register: Register = on => {
       return false
     }
 
+    /** `~` only ever means the home dir this session resolved once (see userHome) */
+    const expandHome = (p: string) => (home && p.startsWith('~') ? home + p.slice(1) : p)
+
+    /**
+     * `"shioaji"` in `twSources`: 永豐's Python SDK, macOS/Linux only.
+     * `nohup ... >>log 2>&1 &` wrapped in `/bin/sh -c` is what outlives the
+     * one-shot run() call - redirecting the script's output to the log file
+     * gives the wrapper's OWN short-lived pipes something to close
+     * immediately, and `&` backgrounds the real script before that happens.
+     */
+    const feedTwShioaji = (now: number): Promise<boolean> => {
+      const python = expandHome(config.shioaji.python)
+      const script = `${$.plugin.root}/scripts/fetch-quotes-shioaji.py`
+      const logPath = `${runtime}stock-shioaji.log`
+      return feedTwFetcher(now, {
+        route: 'shioaji',
+        label: '永豐',
+        python,
+        script,
+        interval: config.shioaji.interval,
+        extraArgs: ['--env', expandHome(config.shioaji.env)],
+        logPath,
+        pidPath: `${runtime}stock-shioaji.pid`,
+        wrap: args => ['/bin/sh', '-c', `nohup "$0" "$@" >>"${logPath}" 2>&1 &`, python, script, ...args],
+      })
+    }
+
+    /**
+     * `"capital"` in `twSources`: 群益's SKCOM, a Windows COM server. There
+     * is no `nohup` here and no shell worth trusting with the quoting of a
+     * python path that may sit under `Program Files`, so the script detaches
+     * ITSELF: `--detach` makes it re-launch a DETACHED_PROCESS child with
+     * `--log` for output and return at once, which is what lets run()
+     * resolve. The wrapper is therefore just the plain argv.
+     */
+    const feedTwCapital = (now: number): Promise<boolean> => {
+      const python = expandHome(config.capital.python)
+      const script = `${$.plugin.root}/scripts/fetch-quotes-capital.py`
+      const logPath = `${runtime}stock-capital.log`
+      const indices = config.capital.indices.map(i => `${i.code}:${i.name}`).join(',')
+      return feedTwFetcher(now, {
+        route: 'capital',
+        label: '群益',
+        python,
+        script,
+        interval: config.capital.interval,
+        // `--indices ""` is a real instruction (no index rows), which is why
+        // it is passed even when empty rather than left off - the script
+        // would otherwise fall back to its own defaults and put the index
+        // board back on a board whose owner turned it off.
+        extraArgs: [
+          '--env',
+          expandHome(config.capital.env),
+          '--dll',
+          expandHome(config.capital.dll),
+          '--indices',
+          indices,
+          '--log',
+          logPath,
+          '--detach',
+        ],
+        logPath,
+        pidPath: `${runtime}stock-capital.pid`,
+        wrap: args => [python, script, ...args],
+      })
+    }
+
     /**
      * Tries `config.twSources` in order and stops at the first one that
      * prices Taiwan this tick. `twSources` is never empty (parseTwSources
@@ -2381,7 +2562,13 @@ export const register: Register = on => {
     const feedTw = async (now: number) => {
       for (const source of config.twSources) {
         const ok =
-          source === 'shioaji' ? await feedTwShioaji(now) : source === 'mis' ? await feedTwMis(now) : await feedTwYahoo(now)
+          source === 'shioaji'
+            ? await feedTwShioaji(now)
+            : source === 'capital'
+              ? await feedTwCapital(now)
+              : source === 'mis'
+                ? await feedTwMis(now)
+                : await feedTwYahoo(now)
         if (ok) return
       }
     }
