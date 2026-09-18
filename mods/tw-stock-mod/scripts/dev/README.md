@@ -12,12 +12,13 @@ the bare username) and exits 1 on any hit; run it before every release.
 
 `assert.mjs` is a two-function helper (`ok(cond, msg)`, `done()`) that turns a
 harness's printed output into a real pass/fail: `ok` prints `ok `/`FAIL ` and
-sets `process.exitCode = 1` on a miss, `done()` prints the final tally. Only
-`feed-idle.mjs`, `chart-nav.mjs` and `rank-cross.mjs` use it - they are the
-three harnesses this exits non-zero on a real regression. `board-harness.mjs`,
-`frames.mjs`, `file-bars.mjs` and the rest still just print for a human to
-read; `run-checks.sh` below runs `file-bars.mjs` too but only as a smoke test
-(it always exits 0), not as an assertion.
+sets `process.exitCode = 1` on a miss, `done()` prints the final tally.
+`feed-idle.mjs`, `chart-nav.mjs`, `rank-cross.mjs`, `crypto-feed.mjs`,
+`crypto-sort.mjs` and `market-select.mjs` use it - they are the harnesses
+this exits non-zero on a real regression.
+`board-harness.mjs`, `frames.mjs`, `file-bars.mjs` and the rest still just
+print for a human to read; `run-checks.sh` below runs `file-bars.mjs` too but
+only as a smoke test (it always exits 0), not as an assertion.
 
 `run-checks.sh` is the one entry point that runs the asserting harnesses
 end-to-end against disposable fixtures (never against your real project) and
@@ -62,6 +63,9 @@ copy theirs if you add a new harness.
 | `feed-idle.mjs` | does a closed market stop being polled, and does its snapshot still hold **(asserts)** | `node feed-idle.mjs $OUT/register.js <proj>` |
 | `feed-open-snooze.mjs` | does an open market still get polled, and does 收起 stop it | `node feed-open-snooze.mjs $OUT/register.js <proj>` |
 | `rank-cross.mjs` | when two symbols' 漲跌幅 cross in rank, does the table mark the row that changed occupant with `was.code` **(asserts, currently FAILs - PR-a target)** | `node rank-cross.mjs $OUT/board.js $OUT/register.js <proj>` |
+| `crypto-feed.mjs` | does Pionex's ticker endpoint get parsed right: `result:false` treated as failure (never a price), a 429 holding off for the cooldown with no retry inside it, and a ten-coin watchlist costing one request a tick **(asserts, no fixture directory needed - builds its own stub config in-process)** | `node crypto-feed.mjs $OUT/register.js` |
+| `crypto-sort.mjs` | the `'volume'`/`'marketcap'` sort keys: `'volume'` ranks by Pionex's `amount` (USDT turnover), never the coin-count `volume` field; `'marketcap'` ranks by CoinGecko's cached circulating supply x live price, with a rank flip that proves it is not just amount in disguise; a CoinGecko failure still publishes quotes live and falls back to volume, logged once; crypto defaults to `'marketcap'`, tw/us still default to `'change'`, and `'marketcap'`/`'volume'` picked on tw falls back to `'change'` rather than drawing unsorted **(asserts, no fixture directory needed - builds its own stub config in-process)** | `node crypto-sort.mjs $OUT/register.js` |
+| `market-select.mjs` | the market control itself: terminal draws a `Select` (five options now - 台股/台股庫存/美股/美股庫存/加密貨幣, the holdings/pnl stop folds into the same dropdown instead of a separate Button, value packs market+view together) rather than the old cycle `Button`; picking crypto switches the board AND fires its fetch immediately, not on the next tick; a resolved table with no `Select` falls back to the cycle `Button` and it still cycles; no independent holdings Button exists anywhere, on any market **(asserts, no fixture directory needed - builds its own stub config in-process)** | `node market-select.mjs $OUT/register.js` |
 
 ## The clock is yours to drive
 
@@ -120,14 +124,19 @@ Builds `register.js`/`board.js` into `$OUT` (default
 `${TMPDIR:-/tmp}/tw-stock-mod-dev`), writes disposable fixture projects under
 a `mktemp -d` (never inside the repo, never touching your real project or
 `~/.claude`), runs `feed-idle.mjs` → `chart-nav.mjs` → `rank-cross.mjs` →
-`file-bars.mjs` → `check-personal.sh` in that order, and prints a
-`PASS`/`FAIL` line per check. Exits non-zero if any of them did.
+`file-bars.mjs` → `crypto-feed.mjs` → `crypto-sort.mjs` → `market-select.mjs`
+→ `check-personal.sh` in that order, and prints a `PASS`/`FAIL` line per
+check. Exits non-zero if any of them did.
 
 `chart-nav` and `rank-cross` are expected to `FAIL` right now - see PR-a
-above. `feed-idle`, `file-bars` and `check-personal` should all be green;
-`feed-idle` and `file-bars` hit the real Yahoo endpoint (see "The clock is
-yours to drive" above), so a `FAIL` on either one there is worth checking
-against the network before assuming it's a real regression.
+above. `feed-idle`, `file-bars`, `crypto-feed`, `crypto-sort`,
+`market-select` and `check-personal` should all be green; `feed-idle` and
+`file-bars` hit the real Yahoo endpoint (see "The clock is yours to drive"
+above), so a `FAIL` on either one there is worth checking against the
+network before assuming it's a real regression. `crypto-feed`, `crypto-sort`
+and `market-select` hit no network at all (their own `$.http.fetch` stub
+answers canned responses), so a `FAIL` in any one of them is never a network
+fluke.
 
 ## The stub host cannot answer everything
 

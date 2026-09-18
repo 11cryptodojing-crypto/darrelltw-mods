@@ -13,7 +13,7 @@ type TextTag = ClientElements['Text']
 // here looks arbitrary. Never name a local variable `h`: every JSX tag in this
 // file compiles to h(...).
 
-export type MarketId = 'tw' | 'us'
+export type MarketId = 'tw' | 'us' | 'crypto'
 export type Phase = 'open' | 'closed'
 export type View = 'table' | 'chart' | 'pnl'
 
@@ -597,8 +597,27 @@ function signed(value: number, decimals = 2): string {
   return sign + thousands(Math.abs(value), decimals)
 }
 
-// up is red and down is green on the Taiwan board, the other way round on the
-// US board - the whole reason this mod tracks which market it is showing
+/**
+ * How many decimals a watchlist PRICE cell prints with. tw/us stay a fixed
+ * 2 - a table mixing NT$18.65 and NT$6,055 stocks still reads fine at a
+ * flat 2. Crypto has no such range: BTC trades in the tens of thousands
+ * while DOGE trades in cents, and a fixed decimal count either drowns DOGE
+ * in trailing zeros or throws away BTC's only meaningful digits - so this
+ * scales the decimal count to the PRICE's own magnitude instead of the
+ * market's, and only for crypto (tw/us keep the flat 2 they always had).
+ */
+function quotePriceDecimals(market: MarketId, price: number): number {
+  if (market !== 'crypto') return 2
+  if (price >= 1000) return 0
+  if (price >= 1) return 2
+  return 4
+}
+
+// up is red and down is green on the Taiwan board, the other way round on
+// the US board - the whole reason this mod tracks which market it is
+// showing. Crypto follows the US convention (green up / red down) - that is
+// the crypto-market norm, not a "not Taiwan" default, and the `!== 'tw'`
+// shape below already reads that way for free.
 function tone(market: MarketId, value: number): string {
   if (value === 0) return FLAT
   const up = market === 'tw' ? DOWN_RED : UP_GREEN
@@ -909,7 +928,10 @@ function drawTwoColQuote(r: Row, half: HalfLayout, q: QuoteRow, market: MarketId
   const turn = q.was ? rowTurn - slot * (turned ? PAGE_ROW_STAGGER : ROW_STAGGER) : RESTING
   const was = q.was ?? q
   const stagger = turned ? 0 : STAGGER
-  flapRight(r, half.priceRight, thousands(was.price), thousands(q.price), WHITE, turn, half.priceCol, stagger)
+  // decimals off the CURRENT price so a flap does not change digit count
+  // mid-turn (was.price and q.price share the new price's own magnitude)
+  const priceDecimals = quotePriceDecimals(market, q.price)
+  flapRight(r, half.priceRight, thousands(was.price, priceDecimals), thousands(q.price, priceDecimals), WHITE, turn, half.priceCol, stagger)
   flapRight(r, half.pctRight, pctText(was.pct), pctText(q.pct), color, turn, half.priceCol, stagger)
 }
 
@@ -1102,7 +1124,9 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
     // and the totals row read as integer TWD, the same way the rest of the
     // band's TWD figures do (US keeps cents throughout).
     const priceDecimals = 2
-    const decimals = props.market === 'us' ? 2 : 0
+    // integer TWD only for tw - us and crypto (both USD-family, cents-
+    // denominated) keep 2 decimals the same way
+    const decimals = props.market === 'tw' ? 0 : 2
     // register.tsx has already sorted the full list by props.pnlSortKey/Dir
     // and clamped holdingsScroll to it - this only slices the window and
     // marks which header cell is active.
@@ -1363,8 +1387,13 @@ export default function StockBandBoard(props: BoardProps | undefined, surface: C
         const was = q.was ?? q
         const left = lay.priceCol
         const stagger = turned ? 0 : STAGGER
-        flapRight(r, lay.priceRight, thousands(was.price), thousands(q.price), WHITE, turn, left, stagger)
-        flapRight(r, lay.chgRight, signed(was.change), signed(q.change), color, turn, left, stagger)
+        // decimals off the CURRENT price so a flap does not change digit
+        // count mid-turn; `change` shares it with `price` (same units, same
+        // magnitude problem) - `pct` stays a flat 2, percentages have no
+        // such range regardless of market
+        const priceDecimals = quotePriceDecimals(props.market, q.price)
+        flapRight(r, lay.priceRight, thousands(was.price, priceDecimals), thousands(q.price, priceDecimals), WHITE, turn, left, stagger)
+        flapRight(r, lay.chgRight, signed(was.change, priceDecimals), signed(q.change, priceDecimals), color, turn, left, stagger)
         flapRight(r, lay.pctRight, pctText(was.pct), pctText(q.pct), color, turn, left, stagger)
         if (props.highlight && i === topMover) r.fillBg(ROW_HILIGHT, lay.pctRight)
       }

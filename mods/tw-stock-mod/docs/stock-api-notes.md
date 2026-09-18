@@ -11,10 +11,16 @@
 > 盤點，但 §1 的架構結論已經作廢（hooks 模組有 `$.http.fetch`，不需要外部
 > fetcher）。
 
-現況：**兩個市場都由 hooks 模組自己抓，預設都是 Yahoo**（免金鑰、台美一支
-API 搞定）。台股要盤中真即時，macOS／Linux 接永豐 Shioaji（見 §8）、Windows
-接群益 Capital（見 §10）；其他券商／付費行情走 `.claude/stock-quotes.json`
-這個 override 檔案接縫（見 §9）。
+> 🔴 **2026-09-18 更新：第三個市場（加密貨幣）接上了，資料層與設定 only —
+> 市場切換 UI 是下一階段。** source of truth 是文末 **§11（Pionex，
+> 2026-09-18）**。跟 tw/us 不同：24/7 無開收盤、不進 auto 市場輪替（只有
+> `market: "crypto"` 明確指定才顯示）、漲跌是 24 小時漲跌不是對昨收。
+
+現況：**三個市場都由 hooks 模組自己抓**，tw/us 預設都是 Yahoo（免金鑰、台美
+一支 API 搞定），crypto 預設是 Pionex（免金鑰，見 §11）。台股要盤中真即時，
+macOS／Linux 接永豐 Shioaji（見 §8）、Windows 接群益 Capital（見 §10）；其他
+券商／付費行情走 `.claude/stock-quotes.json` 這個 override 檔案接縫（見
+§9）——這個接縫目前只服務 tw/us，crypto 還沒接進去。
 
 > ⚠️ §1-§5 的驗證狀態：這些端點是在更早的 session 盤點的，當時對外連線走政策代理，
 > 這幾支端點的 CONNECT 都被 gateway 回 403（組織政策拒絕，不是端點壞掉），
@@ -589,3 +595,107 @@ stdout=log, stderr=log)` 重開一個自己然後立刻返回。心跳檔、pid 
 要翻案的訊號：群益把 K 線（`SKQuoteLib_RequestKLineAMByDate`，分線／新版輸出
 格式是 `年/月/日, 時:分, 開,高,低,收, 量`）也接進來，就能讓這條路線同時供 `bars`
 跟 `series`，比永豐那條多一截——目前兩條都沒做，K 棒一律走 Yahoo。
+
+---
+
+## 11. Pionex（加密貨幣第三個市場，2026-09-18 實測）
+
+### 11.1 端點與資料形狀
+
+公開、免金鑰、**免任何 header**（跟 Yahoo 不同——Yahoo 沒有瀏覽器 UA 會被
+擋，Pionex 一支裸 `curl` 就 200）：
+
+```
+GET https://api.pionex.com/api/v1/market/tickers?symbol=BTC_USDT
+GET https://api.pionex.com/api/v1/market/tickers            # 不帶 symbol，回全市場
+```
+
+成功（HTTP 200）：
+
+```json
+{"result":true,"data":{"tickers":[{"symbol":"BTC_USDT","time":1789746167017,
+ "open":"76846.01","close":"80707.58","high":"81153.69","low":"76259.98",
+ "volume":"38480.088467","amount":"3017756588.53451109","count":499384}]},
+ "timestamp":1789746167461}
+```
+
+失敗（**HTTP 仍是 200**——`result` 欄位才是成敗，不是狀態碼）：
+
+```json
+{"result":false,"code":"MARKET_INVALID_SYMBOL","message":"symbol error","timestamp":1789746227}
+```
+
+**`symbol=A,B` 不能一次帶多檔**（2026-09-18 實測）：
+
+```sh
+$ curl -s 'https://api.pionex.com/api/v1/market/tickers?symbol=BTC_USDT,ETH_USDT'
+{"result":false,"code":"MARKET_INVALID_SYMBOL","message":"symbol error","timestamp":1789746632}
+```
+
+所以 `feedCrypto()` 走「不帶 `symbol` 拉全市場（~330 檔、約 55 KB）再本地
+filter」這條路，watchlist 幾檔都是一次 tick 一個請求，不是逐檔打。
+
+其他欄位坑（實作細節見 `hooks/register.tsx` 的 `feedCrypto`/`pionexSymbol`
+註解，這裡只記證據）：
+
+- 所有數值是字串，要 `parseFloat`。
+- **沒有 changePercent 欄位。** `close` 是現價，`open` 是「24 小時前」的價，
+  不是「昨收」——這個市場的漲跌語意因此是 **24 小時漲跌**，跟 tw/us 的「對
+  昨收」不是同一件事。`feedCrypto` 把 `open` 塞進 `FileQuote.prevClose`，
+  借用既有的 `quoteRow()` 算式（沿用它，不是重寫一套）。
+- `symbol` 是 `BASE_QUOTE`（底線分隔），如 `BTC_USDT`。
+- 時間戳是 epoch 毫秒、UTC 基準，`new Date(ms)` 直接可用；但**錯誤物件的
+  `timestamp` 是秒**，不要拿來用。
+- **上架清單是 Pionex 自己的，不是幣圈通用的。** TON（`TON_USDT`）在 Pionex
+  上完全沒有市場（對照過完整 ~330 檔清單，2026-09-18／19 兩次都確認）。原本
+  的預設清單有 TON，而 `crypto-feed.mjs` 的 fixture 自己捏了一筆 `TON_USDT`
+  出來，於是**測試對著一個不存在的市場通過了**。兩邊都換成 BCH（Pionex 有，
+  且是成交額排得上的主流幣）。
+  - 教訓兩條：①預設清單的每個代號都要對照真實回應驗過，別假設某個幣「一定
+    有」；②fixture 的每一列都必須對應真實市場，否則測試證明不了真實 feed 的
+    任何事。
+  - 代號不存在本身不會壞：board 既有的「有快照但這個代號沒被定價」路徑會把
+    它畫成灰色 placeholder，不是假價格。但預設清單不該出一列永遠填不上的。
+  - 查法：`curl -s 'https://api.pionex.com/api/v1/market/tickers' | python3 -c "import json,sys; print([t['symbol'] for t in json.load(sys.stdin)['data']['tickers']])"`
+
+### 11.2 限流：weight 桶子實測（2026-09-18）
+
+官方文件只寫「10 per second」，且明講單位是 **weight**，不是 request 數，
+也不公開各端點的 weight 對照表
+（<https://pionex-doc.gitbook.io/apidocs/restful/general/rate-limit>）。以下是
+針對 `market/tickers` 這支端點本機實測出來的桶子形狀，**只對這支端點成立**，
+不要外推到 `depth`／`klines`／私有端點：
+
+- 每個回應都帶 `x-ratelimit-tokens`（剩餘額度，含小數）與 `x-ratelimit-last`
+  （unix 秒、含小數，看起來是上次計費的時間戳——目前只記錄，沒有用在程式邏輯
+  裡）。
+- 閒置穩定在 **29~30**，這是桶子容量；約 **10 tokens/秒**回補（跟官方講的
+  "10 per second" 對得上），停手後 **2 秒內**回補到 29。
+- **payload 大小不影響 weight**：拉全量（`?type=PERP`，612 檔、107 KB）跟拉
+  單檔（`?symbol=BTC_USDT`）用平行對照組量，兩組每發 tokens 掉幅一致（約
+  −1）——`market/tickers` 是純 per-request 計費，全量拉取沒有額外代價。
+- 25 發平行請求打下去，桶子掉到 **8.43**，**25/25 全部 HTTP 200，一次 429
+  都沒有**——這是驗證「10 連發不會撞牆」的證據，**不是**「限制其實更寬鬆」的
+  證據（10 連發剛好貼著上限，沒有超過），輪詢間隔仍維持 30 秒一次不放寬。
+- **`x-ratelimit-tokens` 是整個 IP 共用的桶，不是這支程式自己的用量**——同一
+  台機器上任何其他東西打 Pionex，都會讓這支程式讀到偏低的值。`feedCrypto`
+  在讀到低於 5 時跳過那一 tick 不打，這是正常的「主動讓路」，可能被別人的
+  流量觸發，不代表這支程式有 bug，也**不會**因此加重試或縮短輪詢間隔去補償
+  ——加重試正是官方文件警告的「failing to back off」，會把封鎖時間疊上去。
+
+429 本身：blocks the IP 60 秒，且**封鎖期間收到的請求會再疊加 +10 秒**，所以
+`CRYPTO_COOLDOWN_MS` 訂在 90 秒（比官方 60 秒門檻留一截安全邊界），是固定等待，
+不是像 Yahoo 那樣的指數退避（Yahoo 的節流行為沒有這麼明確寫在文件上，才需要
+指數退避去摸索；Pionex 這支是文件寫死的固定長度封鎖，不需要再發明一條曲線）。
+
+### 11.3 一個順手修掉的既有 bug：`round2()` 對小數價格失真
+
+寫 `scripts/dev/crypto-feed.mjs` 的快樂路徑測試時抓到：`quoteRow()` 原本用
+`round2()`（固定四捨五入到小數點後 2 位）算 `change`，這對 tw/us（沒有低於
+$1 的標的）無感，但 DOGE 這種 <$1 的幣會被輾壓——0.08177 → 0.08735 的真實漲幅
+是 $0.00558，`round2` 四捨五入成 $0.01，`pct` 又是從這個被捨入過的 `change`
+算出來的，等於把 6.8% 的真實漲跌顯示成 12.2%，不是顯示層的小瑕疵，是資料本身
+就算錯了。改成 `roundPrice()`：依數值本身的量級決定小數位數（≥1000 用 0
+位、≥1 用 2 位、<1 用 4 位，跟 `board.tsx` 的 `quotePriceDecimals()` 同一套
+門檻），tw/us 的值全部 ≥1，行為不變；`register.tsx` 裡所有 `round2(` 的呼叫點
+（`quoteRow`／`publish` 的指數計算）都換成了 `roundPrice(`。

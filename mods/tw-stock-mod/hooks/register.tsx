@@ -120,6 +120,62 @@ const US_INDICES: { symbol: string; name: string }[] = [
   { symbol: US_INDEX_SYMBOL, name: 'NASDAQ' },
 ]
 
+// Pionex's public ticker endpoint, no key, no header required at all
+// (verified 2026-09-18: unlike Yahoo, a bare GET with no User-Agent still
+// answers 200). `symbol=A,B` does NOT batch multiple codes in one request
+// (verified 2026-09-18: it answers `{"result":false,"code":
+// "MARKET_INVALID_SYMBOL", ...}`, HTTP 200 regardless) - the endpoint with
+// no `symbol` param at all answers the whole exchange instead (~330
+// tickers, ~55 KB), which is what feedCrypto fetches and filters locally so
+// a ten-coin watchlist still costs one request a tick, not ten.
+const PIONEX_TICKERS_URL = 'https://api.pionex.com/api/v1/market/tickers'
+// Pionex documents the limit as "10 per second" but as a WEIGHT budget, not
+// a request count, and never publishes a per-endpoint weight table
+// (https://pionex-doc.gitbook.io/apidocs/restful/general/rate-limit) - so
+// this cannot be read as "10 requests/second" for every endpoint. Measured
+// against THIS endpoint specifically (2026-09-18, see docs/stock-api-
+// notes.md §11.2 for the full readout): every response carries an
+// `x-ratelimit-tokens` header, steady-state ~29-30, and both a bulk fetch
+// (no `symbol`, ~330 tickers) and a single-symbol fetch cost the same ~1
+// token each - so for `market/tickers`, weight is 1 per request regardless
+// of payload size. That is evidence for this one endpoint only; `depth`,
+// `klines` and anything private have not been measured and are not assumed
+// to match.
+// A 429 blocks the IP for 60s and adds +10s for every request that still
+// lands during the block, so retrying while blocked only makes it worse.
+// CRYPTO_COOLDOWN_MS sits comfortably above that 60s floor rather than
+// matching it exactly, and it is a flat wait, not an exponential backoff -
+// Pionex's own block is a fixed length, not a curve this module needs to
+// invent on top of it (contrast FEED_BACKOFF_MAX_MS, which doubles because
+// Yahoo's own throttling behavior was never this well specified).
+const CRYPTO_COOLDOWN_MS = 90_000
+// `x-ratelimit-tokens` reflects the WHOLE IP's shared bucket, not this
+// module's own usage - anything else on the same machine hitting Pionex
+// lowers the number this module reads too. Below this many tokens,
+// feedCrypto skips firing this one tick rather than spend what is left of
+// someone else's headroom; it does not retry sooner or shorten the
+// interval to compensate; that would be "failing to back off" the way the
+// rate-limit doc warns against, this time self-inflicted.
+const CRYPTO_LOW_TOKENS = 5
+
+// CoinGecko's free `coins/markets` endpoint - no API key needed (verified
+// 2026-09-19, HTTP 200 with no auth header). This is ONLY the market-cap
+// sort's circulating-supply source, never a price: prices still come from
+// Pionex on every tick (see feedCrypto) so a CoinGecko outage never touches
+// what is on screen, only how the crypto list is ordered.
+const COINGECKO_MARKETS_URL = 'https://api.coingecko.com/api/v3/coins/markets'
+// Circulating supply barely moves hour to hour, so this bounds how often
+// fetchCryptoSupply is allowed to hit CoinGecko - market cap itself still
+// updates every tick because it is computed as supply(cached) x price(live),
+// never fetched as a whole number.
+const CRYPTO_SUPPLY_TTL_MS = 3_600_000 // 1 hour
+// CoinGecko publishes no per-endpoint free-tier rate limit (unmeasured as of
+// 2026-09-19 - unlike CRYPTO_COOLDOWN_MS above, which IS a measured Pionex
+// number). This cooldown after a failed/empty answer is a conservative
+// guess, not a documented limit - kept long on purpose until someone
+// measures the real one.
+const CRYPTO_SUPPLY_COOLDOWN_MS = 600_000 // 10 minutes
+
 // `"mis"` in `twSources` sends Taiwan to the exchange instead of Yahoo. Both
 // are keyless, but Yahoo's Taiwan quotes run about twenty minutes behind the
 // floor (measured 2026-09-16: Yahoo answered 10:21:51 while MIS was on
@@ -151,7 +207,7 @@ const TW_YAHOO_INDEX = '^TWII' // the Yahoo route's only index; ^TWOII answers a
 /** a footer index row on the MIS route; `code`/`ex` are what misChannel() reads */
 type TwIndex = { code: string; name: string; ex: TwExchange }
 
-type MarketId = 'tw' | 'us'
+type MarketId = 'tw' | 'us' | 'crypto'
 type Phase = 'open' | 'closed'
 type MarketMode = 'auto' | MarketId
 /** a route the Taiwan feed can try, in the order `Config.twSources` lists them */
@@ -159,6 +215,24 @@ type TwSourceName = 'shioaji' | 'capital' | 'yahoo' | 'mis'
 type View = 'table' | 'chart' | 'pnl'
 /** how many symbols the table draws per row; "auto" picks off the page size, see effectiveColumns() */
 type ColumnMode = 'auto' | 1 | 2
+/**
+ * `'change'`/`'list'` are the original two - rank by 24h(tw/us)/24h(crypto)
+ * %, or leave the watchlist's own order alone. `'marketcap'`/`'volume'` are
+ * crypto-only (see effectiveSort): tw/us have neither Pionex's `amount` nor
+ * a CoinGecko supply cache, so either one falls back to `'change'` there.
+ */
+type SortKey = 'change' | 'list' | 'marketcap' | 'volume'
+/**
+ * How the band lets a person jump between the market/holdings stops (see
+ * marketStops()): `tabs` draws every stop as its own Button, `select`
+ * draws the existing dropdown, `cycle` draws one Button that walks the
+ * stops in order. `tabs` is the default (2026-09-19, at the user's request:
+ * the Select's own reflow/highlight chrome is the engine's, not something
+ * this mod can restyle - tabs and cycle are two config-switchable
+ * alternatives to try instead). See parseConfigRoot for how a config file
+ * picks one; an invalid value falls back to `tabs` rather than throwing.
+ */
+type MarketSwitcher = 'tabs' | 'select' | 'cycle'
 
 type Ticker = {
   code: string
@@ -230,6 +304,57 @@ const US_LIST: Ticker[] = [
   { code: 'ARM', name: 'Arm', prevClose: 239.01, amp: 1.25, phase: 4.8, period: 46, drift: 0.55 },
 ]
 
+// Same field contract as TW_LIST/US_LIST, but `code` is the plain ticker
+// (`BTC`), never the Pionex symbol (`BTC_USDT`) - pionexSymbol() below does
+// that translation the same way yahooSymbol() does for Taiwan, and `name`
+// is the ticker again rather than a company name (there is no issuer to
+// name). `prevClose` here is NOT "yesterday's close" the way it is for
+// tw/us: Pionex has no such concept (see feedCrypto's comment on 24-hour
+// change), so it is only the demo-walk anchor and the config fallback -
+// close prices read directly off the tickers endpoint on 2026-09-18
+// ~23:15 UTC (see docs/stock-api-notes.md §11). amp/phase/period/drift are
+// demo-only, same as the other two lists. Every code here must have a real
+// Pionex market: TON does not (checked against the full ~330-symbol response,
+// 2026-09-18) and was replaced by BCH, the next major by turnover that Pionex
+// actually lists. A code with no market is not a crash - the existing "market
+// has a snapshot but never priced this code" path draws it as a dim
+// placeholder rather than a fake price (see buildProps) - but a default list
+// must not ship a row that can never fill in.
+const CRYPTO_LIST: Ticker[] = [
+  { code: 'BTC', name: 'BTC', prevClose: 80744.04, amp: 1.2, phase: 0, period: 53, drift: 0.3 },
+  { code: 'ETH', name: 'ETH', prevClose: 2579.91, amp: 1.6, phase: 1.1, period: 47, drift: 0.4 },
+  { code: 'SOL', name: 'SOL', prevClose: 110.92, amp: 2.1, phase: 2.2, period: 41, drift: 0.6 },
+  { code: 'BNB', name: 'BNB', prevClose: 756.24, amp: 1.3, phase: 3.3, period: 59, drift: 0.2 },
+  { code: 'XRP', name: 'XRP', prevClose: 1.3785, amp: 2.4, phase: 4.4, period: 37, drift: 0.5 },
+  { code: 'DOGE', name: 'DOGE', prevClose: 0.08735, amp: 3.0, phase: 0.6, period: 33, drift: 0.7 },
+  { code: 'ADA', name: 'ADA', prevClose: 0.2191, amp: 2.6, phase: 1.7, period: 43, drift: 0.35 },
+  { code: 'AVAX', name: 'AVAX', prevClose: 8.1, amp: 2.8, phase: 2.8, period: 39, drift: 0.55 },
+  { code: 'LINK', name: 'LINK', prevClose: 12.16, amp: 2.2, phase: 3.9, period: 45, drift: 0.45 },
+  { code: 'BCH', name: 'BCH', prevClose: 252.6, amp: 1.9, phase: 5.0, period: 51, drift: 0.25 },
+]
+
+// Pionex has no market-cap or circulating-supply field at all (verified
+// 2026-09-18 against the full ticker response: symbol/time/open/close/high/
+// low/volume/amount/count, nothing else) - fetchCryptoSupply asks CoinGecko
+// instead, and CoinGecko's `id` is NOT the ticker code (BNB is
+// `binancecoin`, XRP is `ripple`, AVAX is `avalanche-2`, BCH is
+// `bitcoin-cash` - the rest happen to match their lowercase full name). This
+// table must stay in sync with CRYPTO_LIST by hand - add/remove a coin in
+// one and the same code must be added/removed here too, or its market-cap
+// sort silently falls back to 0 (see marketCapOf).
+const CRYPTO_COINGECKO_ID: Record<string, string> = {
+  BTC: 'bitcoin',
+  ETH: 'ethereum',
+  SOL: 'solana',
+  BNB: 'binancecoin',
+  XRP: 'ripple',
+  DOGE: 'dogecoin',
+  ADA: 'cardano',
+  AVAX: 'avalanche-2',
+  LINK: 'chainlink',
+  BCH: 'bitcoin-cash',
+}
+
 type MarketConf = {
   label: string
   list: Ticker[]
@@ -242,6 +367,25 @@ type MarketConf = {
   open: number
   close: number
   offset: (now: number) => number
+  /**
+   * true for a market that never closes (crypto). phaseOf() reads this
+   * before it ever looks at `open`/`close`/weekday, because a 24/7 market
+   * has no boundary those fields could express - there is no real "closed"
+   * moment to compare `now` against, so minutesToOpen/minutesSinceClose
+   * (which walk forward/back to the next/last such moment) do not apply
+   * either and are never called once this is true. `open`/`close` still
+   * carry 0/1440 for this market (see MARKETS.crypto) so the places that
+   * print them (chart-view axis labels) get a literally true "00:00-24:00"
+   * span instead of an undefined read.
+   */
+  alwaysOpen?: boolean
+  /**
+   * what `sort: undefined` resolves to for THIS market (see effectiveSort) -
+   * the per-market default the old single global `defaultConfig().sort`
+   * used to hardcode. tw/us keep the original 'change'; crypto opens on
+   * 'marketcap', at the user's request (2026-09-19).
+   */
+  defaultSort: SortKey
 }
 
 // Taipei is UTC+8 all year; US eastern is UTC-5, UTC-4 between the 2nd Sunday
@@ -272,6 +416,7 @@ const MARKETS: Record<MarketId, MarketConf> = {
     open: 9 * 60,
     close: 13 * 60 + 30,
     offset: () => 8,
+    defaultSort: 'change',
   },
   us: {
     label: '美股',
@@ -284,6 +429,29 @@ const MARKETS: Record<MarketId, MarketConf> = {
     open: 9 * 60 + 30,
     close: 16 * 60,
     offset: usEasternOffset,
+    defaultSort: 'change',
+  },
+  crypto: {
+    label: '加密貨幣',
+    list: CRYPTO_LIST,
+    hours: '24 小時',
+    // BTC stands in for a headline index (see feedCrypto) - this is only the
+    // pre-fetch demo-walk anchor, same read as CRYPTO_LIST's prevClose
+    // values, 2026-09-18 ~23:15 UTC.
+    indexName: 'BTC',
+    indexClose: 80744.04,
+    indexAmp: 1.2,
+    indexDrift: 0.3,
+    // The whole day, 00:00-24:00 - see alwaysOpen's comment on MarketConf.
+    open: 0,
+    close: 24 * 60,
+    // Crypto has no exchange-local session to translate, so this reads as
+    // Taipei time - taipeiNote() then sees offset === TAIPEI_OFFSET and
+    // skips the "台灣 HH:MM" restatement it would otherwise add for a
+    // market whose hours are in another timezone.
+    offset: () => TAIPEI_OFFSET,
+    alwaysOpen: true,
+    defaultSort: 'marketcap',
   },
 }
 
@@ -313,6 +481,7 @@ function isWeekday(dow: number): boolean {
 // "no trades today" answer is what should decide this later.
 function phaseOf(now: number, market: MarketId): Phase {
   const conf = MARKETS[market]
+  if (conf.alwaysOpen) return 'open'
   const { dow, minutes } = localParts(now, conf.offset(now))
   return isWeekday(dow) && minutes >= conf.open && minutes < conf.close ? 'open' : 'closed'
 }
@@ -379,6 +548,14 @@ const PREVIEW_MINS = 60 // how early a market takes the band over before it open
 // showing the market that closed MOST RECENTLY - its closing prices are the
 // news right after 13:30, not the other side of the world's pre-market - until
 // the other market is within PREVIEW_MINS of its open.
+//
+// Crypto never enters this race on purpose: it is alwaysOpen (see
+// MarketConf), so if it competed here on the same "which one is open"
+// footing it would win every single tick and tw/us would never surface in
+// auto mode again. Auto stays a tw/us pick; crypto only shows up when
+// `market` names it directly or a manual switch lands on it (see mode !==
+// 'auto' below, which is untouched by this - it already returns whatever
+// `mode` says outright).
 function pickMarket(now: number, mode: MarketMode): { market: MarketId; phase: Phase } {
   if (mode !== 'auto') return { market: mode, phase: phaseOf(now, mode) }
   if (phaseOf(now, 'tw') === 'open') return { market: 'tw', phase: 'open' }
@@ -403,6 +580,13 @@ type QuoteRow = {
   pct: number
   prevClose: number
   bars?: Bar[]
+  /**
+   * 24h turnover in USDT (Pionex's `amount` field, NOT `volume` - `volume`
+   * is the coin's own unit count, which is meaningless to rank one coin
+   * against another; see effectiveSort/the `'volume'` sort branch below).
+   * Crypto only - tw/us never set this.
+   */
+  amount?: number
   /**
    * what this row said before the last update; absent when nothing moved.
    * `code`/`name` are only set when the whole row changed symbol - a page turn -
@@ -443,14 +627,35 @@ function demoBars(sym: Ticker, now: number, count: number): Bar[] {
   return bars
 }
 
-function round2(v: number): number {
-  return Math.round(v * 100) / 100
+/**
+ * Rounds a price or a price difference to as many decimals as its own
+ * magnitude needs to stay meaningful, rather than a flat 2 - the same
+ * thresholds board.tsx's quotePriceDecimals() uses for display. A flat 2
+ * decimals is harmless for tw/us (nothing on either watchlist trades under
+ * $1) but silently wrecks a sub-$1 crypto move: DOGE's real 24h change of
+ * $0.00558 rounds to $0.01 at a flat 2 decimals - not a display quirk, an
+ * 80%+ relative error baked into `pct` itself, since pct is computed FROM
+ * this rounded value (see quoteRow below). Scaling by the VALUE being
+ * rounded rather than by market means tw/us (always >= 1) see no behavior
+ * change at all.
+ */
+function roundPrice(v: number): number {
+  const decimals = Math.abs(v) >= 1000 ? 0 : Math.abs(v) >= 1 ? 2 : 4
+  const f = 10 ** decimals
+  return Math.round(v * f) / f
 }
 
-function quoteRow(sym: Ticker, price: number, prevClose: number, bars?: Bar[], wasPrice?: number): QuoteRow {
-  const change = round2(price - prevClose)
+function quoteRow(
+  sym: Ticker,
+  price: number,
+  prevClose: number,
+  bars?: Bar[],
+  wasPrice?: number,
+  amount?: number,
+): QuoteRow {
+  const change = roundPrice(price - prevClose)
   // the old number measured against the same close, so only the price moved
-  const wasChange = wasPrice === undefined ? 0 : round2(wasPrice - prevClose)
+  const wasChange = wasPrice === undefined ? 0 : roundPrice(wasPrice - prevClose)
   return {
     code: sym.code,
     name: sym.name,
@@ -461,6 +666,7 @@ function quoteRow(sym: Ticker, price: number, prevClose: number, bars?: Bar[], w
     // a Client's props must not hold undefined: the engine rejects the whole
     // tree and draws nothing. Rows without K bars omit the key instead.
     ...(bars ? { bars } : {}),
+    ...(amount !== undefined ? { amount } : {}),
     // a row that did not move has nothing to turn, and turning it anyway is
     // noise: a real board only flaps what changed
     ...(wasPrice !== undefined && wasPrice !== price
@@ -470,7 +676,7 @@ function quoteRow(sym: Ticker, price: number, prevClose: number, bars?: Bar[], w
 }
 
 // --- optional config / quotes files ----------------------------------------
-type FileQuote = { price: number; prevClose?: number; name?: string; bars?: Bar[] }
+type FileQuote = { price: number; prevClose?: number; name?: string; bars?: Bar[]; amount?: number }
 
 // A holding as the holdings file or `stock-band.json`'s `holdings` block
 // states it - `price`/`prevClose` are optional because the live feed usually
@@ -534,7 +740,14 @@ function sortHoldings(list: PricedHolding[], key: PnlSortKey, dir: 'asc' | 'desc
 type Config = {
   market: MarketMode
   refreshMs: number
-  sort: 'change' | 'list'
+  /**
+   * undefined means "no explicit choice" - effectiveSort() then resolves it
+   * off MARKETS[market].defaultSort, so each market keeps its own default
+   * (crypto: marketcap, tw/us: change) instead of one hardcoded global value.
+   * See parseConfigRoot for how an explicit `"sort"` in the config file
+   * overrides this.
+   */
+  sort?: SortKey
   highlight: boolean
   /**
    * how many symbols the table draws per row. `auto` picks off the page size:
@@ -607,6 +820,8 @@ type Config = {
    * band whose Taiwan route is a live brokerage. Default `"file"`.
    */
   holdingsSource: 'file' | 'config'
+  /** which of the three market-switch control styles the band draws; default `'tabs'` - see MarketSwitcher's own comment */
+  marketSwitcher: MarketSwitcher
 }
 
 type ShioajiConfig = {
@@ -692,7 +907,9 @@ function defaultConfig(): Config {
   return {
     market: 'auto',
     refreshMs: DEFAULT_REFRESH_MS,
-    sort: 'change',
+    // no `sort` key here on purpose - see Config.sort's own comment. Each
+    // market names its own default (MARKETS[id].defaultSort) instead of one
+    // hardcoded value that would be wrong for either crypto or tw/us.
     highlight: true,
     columns: 'auto',
     feed: 'auto',
@@ -702,7 +919,7 @@ function defaultConfig(): Config {
     twIndices: TW_INDICES,
     animation: 'full',
     countdown: true,
-    lists: { tw: TW_LIST, us: US_LIST },
+    lists: { tw: TW_LIST, us: US_LIST, crypto: CRYPTO_LIST },
     shioaji: { python: 'python3', env: '~/.sinobon.env', interval: 10 },
     capital: {
       python: 'python',
@@ -714,8 +931,25 @@ function defaultConfig(): Config {
         { code: 'OTCA', name: 'TPEx' },
       ],
     },
-    holdings: { tw: [], us: [] },
+    // crypto holdings have no broker-fetcher route (see feedCrypto) - the
+    // key only exists so Config.holdings stays a total Record<MarketId, ...>
+    // and a hand-written config can still opt in through the manual
+    // `holdings` block the same way tw/us do.
+    holdings: { tw: [], us: [], crypto: [] },
     holdingsSource: 'file',
+    // `select`, the dropdown. It collapses to about 12 columns, the same
+    // order as `cycle`, and it shows every stop at once when opened rather
+    // than making a person walk the ring to find out what exists.
+    //
+    // NOT `tabs`, measured on a real 100-column terminal (2026-09-19): the
+    // tabs row needs 30 columns, and the header line it shares already spends
+    // about 36 on the session state, the market hours and the Taipei
+    // restatement, on top of RIGHT_BUTTON_GROUP_COLS. That totals ~106, so
+    // tabs fits only a terminal wider than most, and at 100 it silently drops
+    // the Taipei hours instead. `tabs` stays available for a wide terminal,
+    // `cycle` for a narrow one - and `cycle` is what `select` falls back to
+    // wherever the surface has no Select element (mobile). See MarketSwitcher.
+    marketSwitcher: 'select',
   }
 }
 
@@ -732,6 +966,12 @@ function pageSize(columns: 1 | 2): number {
 /** the markets one feed tick prices, given where the band is pointed right now */
 function feedMarkets(cfg: Config, market: MarketId): MarketId[] {
   if (cfg.feed === 'off') return []
+  // `both` stays tw+us only - it predates crypto and means "keep both
+  // traditional markets warm for an instant switch", not "everything this
+  // config could ever show". Crypto still gets fetched whenever it is
+  // actually on screen, through the `auto` branch right below - `market`
+  // carries whatever pickMarket resolved, which is 'crypto' outright once
+  // `config.market` names it (see pickMarket's mode !== 'auto' branch).
   if (cfg.feed === 'both') return ['tw', 'us']
   if (cfg.feed === 'auto') return [market]
   return [cfg.feed]
@@ -740,6 +980,11 @@ function feedMarkets(cfg: Config, market: MarketId): MarketId[] {
 /** what one market costs per tick, before the chart view's own bar fetch is added */
 function marketRequests(cfg: Config, market: MarketId): number {
   if (market === 'us') return Math.ceil((cfg.lists.us.length + US_INDICES.length) / SPARK_BATCH)
+  // Pionex's ticker endpoint answers the whole exchange in one request
+  // whatever the watchlist length - `symbol=A,B` does not batch (verified
+  // 2026-09-18, see PIONEX_TICKERS_URL) so feedCrypto pulls everything and
+  // filters locally instead of paying per symbol.
+  if (market === 'crypto') return 1
   // The preferred route's own cost - shioaji costs this module no HTTP
   // requests at all, so it is estimated as Yahoo's (the likely fallback,
   // and a safe overestimate for the budget floor below).
@@ -752,13 +997,17 @@ function marketRequests(cfg: Config, market: MarketId): number {
 /**
  * How many requests one feed tick costs, at its worst. `auto` prices one
  * market at a time, so it costs the dearer of the two rather than the sum;
- * `both` really does pay for both.
+ * `both` really does pay for both. Crypto is folded into the `auto`/pinned
+ * max here for completeness (feedMarkets already routes to it whenever
+ * `market` names it - see feedMarkets), even though its cost is a fixed 1
+ * and so never actually changes which side of the max wins.
  */
 function requestsPerTick(cfg: Config): number {
   if (cfg.feed === 'off') return 0
   const tw = marketRequests(cfg, 'tw')
   const us = marketRequests(cfg, 'us')
-  return cfg.feed === 'both' ? tw + us : cfg.feed === 'tw' ? tw : cfg.feed === 'us' ? us : Math.max(tw, us)
+  const crypto = marketRequests(cfg, 'crypto')
+  return cfg.feed === 'both' ? tw + us : cfg.feed === 'tw' ? tw : cfg.feed === 'us' ? us : Math.max(tw, us, crypto)
 }
 
 /**
@@ -826,9 +1075,15 @@ function parseConfigRoot(root: Record<string, unknown> | undefined): Config {
   const cfg = defaultConfig()
   if (!root) return cfg
   const market = str(root.market, 'auto')
-  if (market === 'tw' || market === 'us' || market === 'auto') cfg.market = market
+  if (market === 'tw' || market === 'us' || market === 'crypto' || market === 'auto') cfg.market = market
   cfg.refreshMs = Math.max(1000, num(root.refreshMs, cfg.refreshMs))
-  if (root.sort === 'list') cfg.sort = 'list'
+  // any of the four is an explicit choice and overrides the per-market
+  // default outright, same as every other field here - an absent/invalid
+  // `sort` leaves cfg.sort unset, so effectiveSort() falls through to
+  // MARKETS[market].defaultSort instead.
+  if (root.sort === 'change' || root.sort === 'list' || root.sort === 'marketcap' || root.sort === 'volume') {
+    cfg.sort = root.sort
+  }
   if (root.highlight === false) cfg.highlight = false
   if (root.columns === 1 || root.columns === 2 || root.columns === 'auto') cfg.columns = root.columns
   const feed = root.feed
@@ -862,14 +1117,23 @@ function parseConfigRoot(root: Record<string, unknown> | undefined): Config {
   cfg.pageMs = pageMs <= 0 ? 0 : Math.max(PAGE_MS_MIN, pageMs)
   if (root.animation === 'off' || root.animation === false) cfg.animation = 'off'
   if (root.countdown === false) cfg.countdown = false
-  cfg.lists = { tw: parseList(root.tw, TW_LIST), us: parseList(root.us, US_LIST) }
+  cfg.lists = {
+    tw: parseList(root.tw, TW_LIST),
+    us: parseList(root.us, US_LIST),
+    crypto: parseList(root.crypto, CRYPTO_LIST),
+  }
   cfg.twIndices = parseTwIndices(root.twIndices)
   const holdings = asRecord(root.holdings)
   cfg.holdings = {
     tw: parseHoldingsList(holdings?.tw),
     us: parseHoldingsList(holdings?.us),
+    crypto: parseHoldingsList(holdings?.crypto),
   }
   if (root.holdingsSource === 'config') cfg.holdingsSource = 'config'
+  const marketSwitcher = root.marketSwitcher
+  if (marketSwitcher === 'tabs' || marketSwitcher === 'select' || marketSwitcher === 'cycle') {
+    cfg.marketSwitcher = marketSwitcher
+  } // anything else (including the default '貓'-style typo) keeps defaultConfig()'s 'tabs'
   return cfg
 }
 
@@ -1205,9 +1469,20 @@ function chartUrl(symbol: string, now: number): string {
  * Taiwan needs the exchange suffix, and a code that carries its own dot
  * (someone wrote `2330.TW` in the config) is left alone.
  */
+// only ever called for tw/us - crypto has its own symbol shape (see
+// pionexSymbol below) and no Yahoo route for K bars (see feedBars' crypto
+// guard), so `market === 'crypto'` never reaches here.
 function yahooSymbol(market: MarketId, t: { code: string; ex?: TwExchange }): string {
   if (market === 'us') return t.code
   return t.code.includes('.') ? t.code : `${t.code}.${t.ex === 'otc' ? 'TWO' : 'TW'}`
+}
+
+/** the Pionex symbol for a watchlist entry: `BTC` -> `BTC_USDT`. Every
+ * crypto quote here is USDT-denominated - Pionex has no other quote asset
+ * this band needs, and the verified symbol shape is BASE_QUOTE (see
+ * PIONEX_TICKERS_URL). */
+function pionexSymbol(code: string): string {
+  return `${code}_USDT`
 }
 
 /** MIS names a symbol by exchange: `tse_2330.tw`, `otc_6488.tw`, `tse_t00.tw` */
@@ -1386,6 +1661,31 @@ const PAGE_TURN_WINDOW_MS = 2500
 /** holdings per page in the pnl view - rows 2..6 of its 8-row board */
 const PNL_PAGE_SIZE = 5
 
+/**
+ * `cfg.sort`'s effective value for the market actually on screen. An unset
+ * `cfg.sort` (the common case - see Config.sort's comment) falls back to
+ * that market's own default. An explicit `'volume'`/`'marketcap'` still
+ * needs data only crypto carries (Pionex's `amount`, CoinGecko's supply
+ * cache) - on tw/us it falls back to `'change'` instead of drawing the list
+ * unsorted (there is no meaningful "unset" fallback that both markets share).
+ */
+function effectiveSort(cfgSort: SortKey | undefined, market: MarketId): SortKey {
+  const wanted = cfgSort ?? MARKETS[market].defaultSort
+  if ((wanted === 'volume' || wanted === 'marketcap') && market !== 'crypto') return 'change'
+  return wanted
+}
+
+/**
+ * price(live, this tick) x circulating supply(CoinGecko, cached - see
+ * cryptoSupply/fetchCryptoSupply). A code with no cached supply (a coin
+ * added to CRYPTO_LIST without a matching CRYPTO_COINGECKO_ID entry, or one
+ * CoinGecko never priced) reads 0 - it sorts to the bottom rather than
+ * crashing or dropping off the list.
+ */
+function marketCapOf(q: QuoteRow): number {
+  return q.price * (cryptoSupply[q.code] ?? 0)
+}
+
 function buildProps(
   now: number,
   cfg: Config,
@@ -1411,6 +1711,7 @@ function buildProps(
         prevClose,
         fromFile.bars,
         quotesFile?.prev?.[sym.code]?.price,
+        fromFile.amount,
       )
     }
     if (quotesFile) {
@@ -1425,7 +1726,30 @@ function buildProps(
     return quoteRow(sym, demoPrice(sym, now), sym.prevClose)
   })
 
-  if (cfg.sort === 'change') quotes.sort((a, b) => b.pct - a.pct)
+  const sort = effectiveSort(cfg.sort, market)
+  if (sort === 'change') {
+    quotes.sort((a, b) => b.pct - a.pct)
+  } else if (sort === 'volume') {
+    // Pionex's `amount` is 24h turnover in USDT - `volume` (not used here)
+    // is the coin's own unit count, and DOGE's ~800M coins next to BTC's
+    // ~40K would rank purely on which coin happens to be cheap, not which
+    // one actually trades the most money. `amount` is the apples-to-apples
+    // number (see QuoteRow.amount).
+    quotes.sort((a, b) => (b.amount ?? 0) - (a.amount ?? 0))
+  } else if (sort === 'marketcap') {
+    if (Object.keys(cryptoSupply).length > 0) {
+      quotes.sort((a, b) => marketCapOf(b) - marketCapOf(a))
+    } else {
+      // CoinGecko has never answered this session (or its cache is still
+      // empty) - market cap cannot be computed at all yet, so this falls
+      // back to volume, the next-best liquidity ranking, rather than
+      // leaving `quotes` in whatever order `list` happened to name them.
+      // fetchCryptoSupply logs this once (cryptoSupplyWarned) - not here,
+      // since buildProps runs every render and must stay side-effect free.
+      quotes.sort((a, b) => (b.amount ?? 0) - (a.amount ?? 0))
+    }
+  }
+  // sort === 'list': no sort, the watchlist's own order stands.
 
   // The single-column table shows 5 symbols a page, the two-column one 10 -
   // effectiveColumns() picks which off the watchlist length (or the config's
@@ -1439,11 +1763,12 @@ function buildProps(
 
   // The chart view follows a CODE, not a page: `page` only moves through
   // setPage (a table page turn) or autoPage, and autoPage freezes itself the
-  // moment view !== 'table' (see autoPage). With `cfg.sort === 'change'`
-  // `quotes` re-sorts every render, so the focused code's rank - and so its
-  // page - can drift out from under a `page` that nothing is moving. This
-  // jumps `page` straight to wherever the code actually sits, before `shown`
-  // is sliced, so the chart never reads a foreign row off a stale page. It
+  // moment view !== 'table' (see autoPage). With `sort !== 'list'` (change,
+  // volume, or marketcap) `quotes` re-sorts every render, so the focused
+  // code's rank - and so its page - can drift out from under a `page` that
+  // nothing is moving. This jumps `page` straight to wherever the code
+  // actually sits, before `shown` is sliced, so the chart never reads a
+  // foreign row off a stale page. It
   // writes `page` directly rather than going through setPage: setPage's
   // pageFrom/pageFromAt bookkeeping only feeds the table's page-turn flap,
   // which the chart view does not draw, and this jump carries no such
@@ -1480,7 +1805,7 @@ function buildProps(
     }
   } else {
     // No page turn is running, but a row's OCCUPANT can still change: with
-    // `cfg.sort === 'change'` the list re-sorts every render, so a rank
+    // `sort !== 'list'` the list re-sorts every render, so a rank
     // cross moves a code to a different on-screen position without page or
     // sort key ever changing. Comparing this render's row at position i
     // against what `lastShown` actually drew there last render catches
@@ -1496,8 +1821,8 @@ function buildProps(
     // `lastShown` would compare AAPL's row against 2330's row on nothing more
     // than shared position. Gated on `quotesFile` too: with no quotes file
     // the whole page is priced by demoPrice()'s continuous sine walk, whose
-    // pct keeps drifting by a hair every render - with `cfg.sort ===
-    // 'change'` that alone reshuffles two close-ranked rows on almost every
+    // pct keeps drifting by a hair every render - with `sort === 'change'`
+    // that alone reshuffles two close-ranked rows on almost every
     // poll, so the demo/off/backoff board would flap nearly every tick for
     // noise instead of a real rank change. A quotes-file-backed row only
     // moves rank when its actual price moved, so real data keeps this check.
@@ -1537,7 +1862,7 @@ function buildProps(
   // bars yet rather than a demo-walk stand-in for a real price.
   //
   // `focusIdx` is looked up by CODE, not carried as a position: `shown` is
-  // freshly re-sorted every render when `cfg.sort === 'change'`, so the code
+  // freshly re-sorted every render when `sort !== 'list'`, so the code
   // a position held last render is not the code it holds this render. A
   // stale position would follow whatever rank crossed into that slot
   // instead of the symbol the chart is actually supposed to be following.
@@ -1632,7 +1957,7 @@ function buildProps(
     sourceLabel: usedFile ? (quotesFile?.sourceLabel ?? '') : '',
     version,
     highlight: cfg.highlight,
-    sorted: cfg.sort === 'change',
+    sorted: sort === 'change',
     columns,
     view,
     focus: focusIdx,
@@ -1693,6 +2018,24 @@ let liveBy: Partial<Record<MarketId, { file: QuotesFile; prev?: Record<string, F
 let liveBars: Record<string, { bars: Bar[]; at: number }> = {}
 let feedSkipUntil = 0 // set by a 429 or a network error, doubling each time
 let feedFailures = 0
+// Crypto's own cooldown, separate from feedSkipUntil/feedFailures above:
+// Pionex's 429 is a flat 60s block (see CRYPTO_COOLDOWN_MS), not something
+// that should share Yahoo's exponential-doubling curve, and a Pionex outage
+// must not stop tw/us from fetching (or the reverse) since they are
+// different hosts with different limits.
+let cryptoSkipUntil = 0
+// last `x-ratelimit-tokens` reading, or undefined once it has been acted on
+// (see feedCrypto) or before the first response ever lands.
+let cryptoTokensRemaining: number | undefined
+let cryptoLowTokensWarned = false // this session's one-time low-tokens log
+// circulating supply per code (CRYPTO_COINGECKO_ID's keys), fetchCryptoSupply's
+// own cache - see CRYPTO_SUPPLY_TTL_MS. Empty until the first successful
+// CoinGecko answer; the marketcap sort branch in buildProps reads this
+// directly and falls back to volume while it is empty.
+let cryptoSupply: Record<string, number> = {}
+let cryptoSupplyFetchedAt = 0 // 0 means "never fetched" - always due
+let cryptoSupplyCooldownUntil = 0 // set after a failed/empty CoinGecko answer
+let cryptoSupplyWarned = false // this session's one-time "falling back to volume" log
 let feedSeq = 0 // one per snapshot the feed accepted; drives the board's live dot
 let nextFeedAt = 0 // when the next request is due; the board counts down to it
 let barsInFlight = false
@@ -1710,7 +2053,7 @@ let snoozedUntil = 0
 // table, so one button covers both "show me the chart" and "next symbol"
 let view: View = 'table'
 // which code the chart view is following, not which position: `shown` gets
-// re-sorted every render under `cfg.sort === 'change'`, so a position would
+// re-sorted every render whenever `sort !== 'list'`, so a position would
 // silently start following whatever rank crossed into it. undefined (never
 // focused yet) and a code that fell off the current page both resolve to
 // position 0 in buildProps (see `focusIdx`), and ui.render syncs this back
@@ -1940,27 +2283,106 @@ function quotesFor(market: MarketId, now: number): QuotesFile | undefined {
 // market from the same market in auto mode, which is a distinction the
 // label has no business carrying: the two draw identical boards and only
 // differ hours later, at the handover.
+//
+// This is now ONLY the `select` style's on-screen width proxy (leftCoreWidth
+// below) - the ▾ suffix reads as "opens a dropdown", which is what `select`
+// actually draws. `cycle`'s own Button (mobile's fallback, an explicit
+// `marketSwitcher: "cycle"`, or `tabs` collapsing for width - see
+// cycleButtonLabel) draws a different label shape now, `‹ 美股 2/5 ›`, so it
+// no longer borrows this function's ▾ text.
 function marketButtonLabel(marketLabel: string, pnl: boolean): string {
   return `${marketLabel}${pnl ? '庫存' : ''} ▾`
+}
+
+// The `select` style's own prefix. The width budget below and the Select
+// element itself must read the SAME constant: the framework draws this text
+// before the value, so a budget that leaves it out under-counts the control
+// by its width and can keep the Taipei restatement on screen after it stops
+// fitting. The label costs `市場` plus the framework's own separator, which a
+// hook cannot measure - SELECT_LABEL_CHROME_COLS covers that separator.
+const MARKET_SELECT_LABEL = '市場'
+const SELECT_LABEL_CHROME_COLS = 2
+
+// A stop's packed identity: the plain MarketId for a table stop, or
+// `${MarketId}:pnl` for that market's holdings stop - see marketStops()/
+// onSelectMarket. crypto never gets the `:pnl` half (see marketStops()'s own
+// comment), so only tw/us ever carry one.
+type MarketSelectValue = MarketId | 'tw:pnl' | 'us:pnl'
+
+/** one stop any of the three market-switcher styles can land on */
+type MarketStop = { value: MarketSelectValue; market: MarketId; pnl: boolean; label: string }
+
+/**
+ * The stops every market-switcher style shares - tabs, select and cycle all
+ * draw/walk THIS list, never three separately maintained ones (2026-09-19,
+ * at the user's request: three interchangeable styles to try, not three
+ * features). Order: 台股, [台股庫存], 美股, [美股庫存], 加密貨幣. `label`
+ * here is the FULL name (`美股庫存`), what `select`'s dropdown rows and
+ * `cycle`'s button both read off MARKETS[id].label directly - `tabs`
+ * shortens the holdings stops on its own (see tabLabel) since its Buttons
+ * sit close enough together that "belongs to the market on its left" reads
+ * from position alone.
+ *
+ * A market's table stop is always present. Its `:pnl` stop only exists when
+ * that market actually has holdings to show - `holdingsFor` already covers
+ * all three sources (the config's own `holdings` block, the holdings file,
+ * and which one wins per `holdingsSource` - see its own doc comment), so
+ * this defers to it rather than re-deriving "does this market have
+ * holdings" a second way. crypto never gets a `:pnl` stop at all, holdings
+ * or not: it has no broker-fetcher route (see feedCrypto/holdingsFor), so a
+ * `crypto:pnl` stop would draw and do nothing.
+ *
+ * (This used to be a module-level constant, computed once at load. A stop
+ * this list decides not to include for a data reason - not a fixed
+ * config/market count - has to be recomputed on every call: `lastHoldingsFile`
+ * is module state that changes after the module loads (the holdings file
+ * arrives on its own poll), so a value cached at load time would keep
+ * showing a market's `:pnl` stop as absent (or present) long after the data
+ * that decision was based on changed. 2026-09-19: an earlier version of this
+ * mod DID gate the US holdings stop on data - `buildCycle()` took a
+ * `hasUsHoldings` argument - but only for US, and a later refactor read that
+ * asymmetry as accidental and dropped the whole condition rather than
+ * extending it to tw. This restores the gate and, per the user's request,
+ * applies it identically to both markets.)
+ */
+function marketStops(cfg: Config): MarketStop[] {
+  return (['tw', 'us', 'crypto'] as const).flatMap(id => {
+    const table: MarketStop = { value: id as MarketSelectValue, market: id, pnl: false, label: MARKETS[id].label }
+    if (id === 'crypto') return [table]
+    const hasHoldings = holdingsFor(id, lastHoldingsFile, cfg).holdings.length > 0
+    if (!hasHoldings) return [table]
+    const pnl: MarketStop = { value: `${id}:pnl` as MarketSelectValue, market: id, pnl: true, label: `${MARKETS[id].label}庫存` }
+    return [table, pnl]
+  })
+}
+
+/** `select`'s own options - a marketStops() list's value/label, in the same order */
+function marketSelectOptions(stops: MarketStop[]): { value: MarketSelectValue; label: string }[] {
+  return stops.map(({ value, label }) => ({ value, label }))
 }
 
 /** one stop on the market button's cycle - a market's table, or its pnl view */
 type CycleStop = { market: MarketId; pnl: boolean }
 
 /**
- * The market button's cycle, in order: 美股 → (美股庫存, only when US
- * holdings are configured - file or config) → 台股 → 台股庫存 → back to 美股.
- * 台股庫存 is always a stop even with no holdings at all (it draws the "沒有
- * 庫存資料" hint row instead of disappearing - a stop that vanishes
- * depending on data would make the cycle's length unpredictable from press
- * to press). Rebuilt on every press since holdings can change mid-session
- * (a fresh stock-holdings.json write, or /reload-plugins).
+ * The market button's cycle, in marketStops() order: 台股 → [台股庫存] →
+ * 美股 → [美股庫存] → 加密貨幣 → back to 台股. A market's pnl stop is only
+ * in the cycle when marketStops() included it (holdings actually exist for
+ * that market) - see marketStops()'s own doc comment for why that has to be
+ * a live check, not a fixed list. `cycle`'s "n/total" label (see
+ * cycleButtonLabel) reads its denominator off `cycle.length` at the call
+ * site, so a stop count that grows or shrinks with the data never makes
+ * that label lie.
+ * This is what mobile still walks with a single button (no `ui_select`
+ * message yet - see the Select capability check in AbovePrompt's
+ * ui.render), what an explicit `marketSwitcher: "cycle"` always draws, and
+ * what `tabs` falls back to when the terminal is too narrow for its own
+ * Buttons (see tabsGroupWidth). `select` never walks this at all - a
+ * dropdown names the destination outright, there is no "next stop" to
+ * compute.
  */
-function buildCycle(hasUsHoldings: boolean): CycleStop[] {
-  const stops: CycleStop[] = [{ market: 'us', pnl: false }]
-  if (hasUsHoldings) stops.push({ market: 'us', pnl: true })
-  stops.push({ market: 'tw', pnl: false }, { market: 'tw', pnl: true })
-  return stops
+function buildCycle(stops: MarketStop[]): CycleStop[] {
+  return stops.map(({ market, pnl }) => ({ market, pnl }))
 }
 
 /**
@@ -1968,12 +2390,54 @@ function buildCycle(hasUsHoldings: boolean): CycleStop[] {
  * on screen right now, auto-picked-by-clock or pinned - buildProps already
  * resolves `market`/`view` that way, so the very first press (still in
  * `auto`) lands on the next stop after whatever the clock was already
- * showing, never a jump back onto the stop already on screen.
+ * showing, never a jump back onto the stop already on screen. `cycle` is
+ * this render's own `buildCycle(marketStops(config))` - passed in rather
+ * than rebuilt here, so a single render only computes `marketStops()` once
+ * (see AbovePrompt's ui.render).
  */
-function nextCycleStop(current: CycleStop, hasUsHoldings: boolean): CycleStop {
-  const cycle = buildCycle(hasUsHoldings)
+function nextCycleStop(current: CycleStop, cycle: CycleStop[]): CycleStop {
   const idx = cycle.findIndex(s => s.market === current.market && s.pnl === current.pnl)
   return cycle[(idx < 0 ? 0 : idx + 1) % cycle.length]
+}
+
+/**
+ * `cycle`'s own label - the one Button shared by mobile's fallback, an
+ * explicit `marketSwitcher: "cycle"`, and `tabs`'s narrow-terminal fallback
+ * (see tabsGroupWidth): `‹ 美股 2/5 ›`, current stop name plus its position
+ * in the cycle out of the total, so a press's destination and "how many more
+ * presses to get back here" are both on the button before it is pressed.
+ */
+function cycleButtonLabel(marketLabel: string, pnl: boolean, pos: number, total: number): string {
+  return `‹ ${marketLabel}${pnl ? '庫存' : ''} ${pos}/${total} ›`
+}
+
+/**
+ * `tabs`'s own per-stop label - a stop's full `美股庫存` shortens to
+ * `·庫存` here: the holdings Button always draws immediately after its
+ * market's own Button (see marketStops()'s order), so adjacency alone says
+ * which market it belongs to and the label does not have to repeat the name.
+ */
+function tabLabel(stop: MarketStop): string {
+  return stop.pnl ? '·庫存' : stop.label
+}
+
+/**
+ * What `tabs`'s Buttons cost in columns: every label's display width, plus
+ * one column for each gap the row draws between them (see the explicit
+ * `<Text> </Text>` siblings in the tabs row below) - same "no way to measure
+ * what the framework actually renders" caveat marketLabel's own comment
+ * already carries for `select`/`cycle`; this reservation is the label text
+ * alone, not the Button chrome around it. Computed off however many stops
+ * `stops` actually holds (see marketStops()) - a market with no holdings
+ * draws one fewer Button, so this must shrink with it rather than assume a
+ * fixed count. The tabs-fit check in AbovePrompt's ui.render adds
+ * RIGHT_BUTTON_GROUP_COLS's own 40-column reservation on top of this before
+ * deciding whether tabs fit, the same "budget vs `cols`" shape showTaipei
+ * already uses.
+ */
+function tabsGroupWidth(stops: MarketStop[]): number {
+  const labels = stops.map(tabLabel)
+  return labels.reduce((sum, l) => sum + dispWidth(l), 0) + (labels.length - 1)
 }
 
 // --- the title/button row ----------------------------------------------
@@ -2167,7 +2631,7 @@ export const register: Register = on => {
         indices.push({
           name: spec.name,
           value: row.price,
-          change: round2(row.price - prev),
+          change: roundPrice(row.price - prev),
           pct: prev ? ((row.price - prev) / prev) * 100 : 0,
         })
       }
@@ -2194,7 +2658,7 @@ export const register: Register = on => {
           index: idx
             ? {
                 value: idx.price,
-                change: round2(idx.price - idxPrev),
+                change: roundPrice(idx.price - idxPrev),
                 pct: idxPrev ? ((idx.price - idxPrev) / idxPrev) * 100 : 0,
               }
             : undefined,
@@ -2250,6 +2714,198 @@ export const register: Register = on => {
         sourceLabel: 'Yahoo 即時',
         barLabel: '5 分 K',
       })
+    }
+
+    /**
+     * Crypto via Pionex's public ticker endpoint. One request answers every
+     * symbol the exchange lists (~330), not just the watchlist's ten - see
+     * PIONEX_TICKERS_URL for why `symbol=A,B` cannot do this in one request
+     * either. Success is `result === true`, never the HTTP status: Pionex
+     * answers its own errors as HTTP 200 with `result: false` (e.g.
+     * MARKET_INVALID_SYMBOL), and treating that as quotes would draw a made-
+     * up price - see docs/stock-api-notes.md §11.
+     */
+    const feedCrypto = async (now: number) => {
+      if (cryptoTokensRemaining !== undefined && cryptoTokensRemaining < CRYPTO_LOW_TOKENS) {
+        // Only skip once: without a fresh response there is no way to learn
+        // the shared bucket refilled, and the measured refill (~10/s, back
+        // to steady-state within 2s of idling - docs/stock-api-notes.md
+        // §11.2) is far faster than this module's own tick interval, so
+        // holding the skip past one tick would just wait for a request that
+        // is never going to fire.
+        cryptoTokensRemaining = undefined
+        if (!cryptoLowTokensWarned) {
+          cryptoLowTokensWarned = true
+          $.ui.log('tw-stock-mod: crypto feed skipped one tick, rate-limit tokens were low (shared across this IP - not necessarily this module’s own usage)')
+        }
+        return
+      }
+      const list = [...config.lists.crypto, ...holdingExtras('crypto', config.lists.crypto, config)]
+      if (list.length === 0) return
+      const res = await $.http.fetch(PIONEX_TICKERS_URL)
+      const tokensHeader = res.headers?.['x-ratelimit-tokens']
+      if (tokensHeader !== undefined) {
+        const tokens = parseFloat(tokensHeader)
+        if (Number.isFinite(tokens)) cryptoTokensRemaining = tokens
+      }
+      if (res.status === 429) {
+        // A flat cooldown, not backOff()'s exponential one - see
+        // CRYPTO_COOLDOWN_MS and cryptoSkipUntil's own comments for why
+        // this stays separate from the Yahoo feed's shared state.
+        cryptoSkipUntil = now + CRYPTO_COOLDOWN_MS
+        $.ui.log(`tw-stock-mod: crypto feed 429'd, next try in ${Math.round(CRYPTO_COOLDOWN_MS / 1000)}s`)
+        return
+      }
+      if (!res.ok) {
+        $.ui.log(`tw-stock-mod: crypto feed HTTP ${res.status}, keeping the last snapshot`)
+        return
+      }
+      let body:
+        | {
+            result?: boolean
+            code?: string
+            data?: { tickers?: { symbol: string; time: number; open: string; close: string; amount: string }[] }
+          }
+        | undefined
+      try {
+        body = JSON.parse(res.text)
+      } catch {
+        $.ui.log('tw-stock-mod: crypto feed answered invalid JSON')
+        return
+      }
+      if (!body || body.result !== true || !body.data?.tickers) {
+        $.ui.log(`tw-stock-mod: crypto feed answered result:false (${body?.code ?? 'unknown'}), keeping last snapshot`)
+        return
+      }
+      const wanted = new Set(list.map(t => pionexSymbol(t.code)))
+      const quotes: Record<string, FileQuote> = {}
+      let tradedAt = 0
+      for (const row of body.data.tickers) {
+        // BTC always gets parsed even when it is not on the watchlist - it
+        // doubles as the headline index below at no extra request, the way
+        // tw/us ride ^TWII/^IXIC on their own batched fetch.
+        if (!wanted.has(row.symbol) && row.symbol !== 'BTC_USDT') continue
+        const price = parseFloat(row.close)
+        // Pionex has no changePercent field and no "previous close" the
+        // way tw/us have one - `open` here is the price 24 HOURS ago, not
+        // yesterday's close. Feeding it into FileQuote's `prevClose` slot
+        // makes quoteRow() (shared with every other market) compute a
+        // 24-HOUR change from it - that is a real semantic difference from
+        // tw/us's "change since the last close", not a shortcut, and it is
+        // why this comment exists rather than just doing it silently.
+        const open = parseFloat(row.open)
+        if (!Number.isFinite(price) || !Number.isFinite(open)) continue
+        // `amount` (24h turnover in USDT) drives the 'volume' sort -
+        // deliberately NOT Pionex's `volume` field, which is the coin's own
+        // unit count (see QuoteRow.amount/effectiveSort). Missing/malformed
+        // just omits the key rather than publishing a fake 0 that would sort
+        // as "no turnover at all".
+        const amount = parseFloat(row.amount)
+        quotes[row.symbol] = { price, prevClose: open, ...(Number.isFinite(amount) ? { amount } : {}) }
+        // epoch ms, UTC-based - no timezone arithmetic needed, unlike the
+        // error object's `timestamp` (seconds, and only present on failure)
+        tradedAt = Math.max(tradedAt, row.time)
+      }
+      if (Object.keys(quotes).length === 0) {
+        $.ui.log('tw-stock-mod: crypto feed answered nothing usable; keeping the last snapshot')
+        return
+      }
+      cryptoSkipUntil = 0
+      publish({
+        market: 'crypto',
+        list,
+        parsed: quotes,
+        keyOf: t => pionexSymbol(t.code),
+        // crypto has no exchange-wide index the way tw/us do - BTC stands
+        // in, parsed above whether or not it is on the watchlist
+        indices: [],
+        indexKey: 'BTC_USDT',
+        tradedAt,
+        now,
+        sourceLabel: 'Pionex 即時',
+        barLabel: '5 分 K',
+      })
+    }
+
+    /**
+     * Circulating supply for the market-cap sort, from CoinGecko - Pionex's
+     * ticker has no such field at all (see CRYPTO_COINGECKO_ID's comment).
+     * Called alongside feedCrypto on every crypto tick, but its own
+     * TTL/cooldown make it a no-op almost every time: it only actually hits
+     * CoinGecko once an hour (CRYPTO_SUPPLY_TTL_MS) or, after a failure,
+     * once per cooldown (CRYPTO_SUPPLY_COOLDOWN_MS). Market cap itself still
+     * updates every tick regardless, since buildProps computes it as
+     * supply(cached here) x price(live from feedCrypto) rather than fetching
+     * a market-cap number outright.
+     *
+     * Deliberately isolated from feedCrypto's own success/failure: this
+     * never touches `liveBy`/`publish`, so a CoinGecko outage or rate-limit
+     * cannot affect the prices on screen, only which sort key buildProps can
+     * actually satisfy (see effectiveSort/the marketcap branch there).
+     */
+    const fetchCryptoSupply = async (now: number) => {
+      if (now < cryptoSupplyCooldownUntil) return
+      if (cryptoSupplyFetchedAt !== 0 && now - cryptoSupplyFetchedAt < CRYPTO_SUPPLY_TTL_MS) return
+      const ids = Object.values(CRYPTO_COINGECKO_ID)
+      if (ids.length === 0) return
+      const warnOnce = () => {
+        // Only warn while the cache is still empty - once a real fetch has
+        // ever succeeded, buildProps has real market caps to sort by and a
+        // later failure just means "keep using the last cache", nothing
+        // worth interrupting the user about.
+        if (Object.keys(cryptoSupply).length > 0) return
+        if (cryptoSupplyWarned) return
+        cryptoSupplyWarned = true
+        $.ui.log('tw-stock-mod: market-cap data (CoinGecko) unavailable this session, sorting crypto by volume instead')
+      }
+      try {
+        const url = `${COINGECKO_MARKETS_URL}?vs_currency=usd&ids=${ids.join(',')}`
+        const res = await $.http.fetch(url)
+        if (!res.ok) {
+          cryptoSupplyCooldownUntil = now + CRYPTO_SUPPLY_COOLDOWN_MS
+          warnOnce()
+          return
+        }
+        const body: unknown = JSON.parse(res.text)
+        if (!Array.isArray(body)) {
+          cryptoSupplyCooldownUntil = now + CRYPTO_SUPPLY_COOLDOWN_MS
+          warnOnce()
+          return
+        }
+        // keyed by CoinGecko `id` first (ripple, binancecoin, ...), since
+        // that is what the answer itself carries - the second loop below
+        // flips it back to OUR ticker code via CRYPTO_COINGECKO_ID.
+        const supplyById: Record<string, number> = {}
+        for (const raw of body) {
+          const row = asRecord(raw)
+          if (!row) continue
+          const id = str(row.id, '')
+          const supply = num(row.circulating_supply, NaN)
+          if (id && Number.isFinite(supply)) supplyById[id] = supply
+        }
+        // Never name a local `next` anywhere inside this module: `next` is the
+        // hook continuation every hook receives, and the engine REFUSES to
+        // load a module that shadows it - "hooks module did not load ...
+        // `next` (the continuation) is declared again (shadowed)". esbuild
+        // and tsc both accept the shadow, and the dev harnesses import the
+        // bundle directly rather than through the engine, so nothing in this
+        // repo catches it before the real host does.
+        const byCode: Record<string, number> = {}
+        for (const [code, id] of Object.entries(CRYPTO_COINGECKO_ID)) {
+          if (supplyById[id] !== undefined) byCode[code] = supplyById[id]
+        }
+        if (Object.keys(byCode).length === 0) {
+          cryptoSupplyCooldownUntil = now + CRYPTO_SUPPLY_COOLDOWN_MS
+          warnOnce()
+          return
+        }
+        cryptoSupply = byCode
+        cryptoSupplyFetchedAt = now
+        cryptoSupplyCooldownUntil = 0
+      } catch {
+        cryptoSupplyCooldownUntil = now + CRYPTO_SUPPLY_COOLDOWN_MS
+        warnOnce()
+      }
     }
 
     // Taiwan via Yahoo. Returns whether it produced a usable snapshot THIS
@@ -2592,7 +3248,17 @@ export const register: Register = on => {
       for (const market of feedMarkets(config, onScreen)) {
         if (!marketNeedsFeed(now, market)) continue
         if (market === 'us') await feedUs(now)
-        else await feedTw(now)
+        else if (market === 'crypto') {
+          // Pionex's own cooldown, not the shared feedSkipUntil above (that
+          // one is Yahoo's and gates the whole feed() call before this
+          // loop even runs) - a Pionex 429 must not also stop tw/us.
+          if (now < cryptoSkipUntil) continue
+          await feedCrypto(now)
+          // Independent of feedCrypto's own result (see fetchCryptoSupply's
+          // own comment) - its own TTL/cooldown make this a no-op on almost
+          // every tick, so riding the same cadence costs nothing extra.
+          await fetchCryptoSupply(now)
+        } else await feedTw(now)
       }
     }
 
@@ -2601,6 +3267,12 @@ export const register: Register = on => {
     // K bars come from Yahoo for both markets: MIS has no candles at all, and
     // a 5-minute bar twenty minutes old still draws the right shape.
     const feedBars = async (market: MarketId, code: string) => {
+      // Pionex's ticker endpoint carries no candles, and yahooSymbol() has
+      // no route for a crypto code (it would produce a nonsense `.TW`
+      // suffix) - so the chart view for crypto stays without live K bars
+      // for now. demoBars() still draws the same fallback shape it draws
+      // for any other market whose live feed has not produced bars yet.
+      if (market === 'crypto') return
       const now = await $.clock.now()
       if (config.feed === 'off' || now < feedSkipUntil || barsInFlight) return
       const key = `${market}:${code}`
@@ -2652,7 +3324,15 @@ export const register: Register = on => {
     const now = await $.clock.now()
     if (!ready) return next(e)
 
-    const { Box, Button, Client, Text } = await $.ui.resolve(e)
+    const { Box, Button, Client, Text, Select } = await $.ui.resolve(e)
+    // Capability check, not a surface-name check: terminal and desktop both
+    // resolve a Select (d.ts Elements), mobile does not (no `ui_select`
+    // message yet). The AbovePrompt guard above only ever lets `terminal`
+    // reach here today, so this reads as always-true in production - but
+    // writing it as "did the table hand out a Select" rather than
+    // `e.surface === 'terminal'` means desktop starts drawing the same
+    // dropdown the day that guard widens, with no second change needed here.
+    const canSelect = Boolean(Select)
 
     // Snoozing used to drop the band with no way back: the only exits were
     // waiting out the 30 minutes or restarting the session. Leave one row
@@ -2677,6 +3357,39 @@ export const register: Register = on => {
 
     const cols = e.viewport?.columns ?? e.props.bodyColumns ?? 80
     const mode = modeOverride ?? config.market
+    // Every stop any of the three switcher styles can land on this render -
+    // see marketStops()'s own doc comment for why this has to be recomputed
+    // here rather than read off a module-level constant: `lastHoldingsFile`
+    // is state that changes after the module loads, so a stop list cached at
+    // load time would go stale the moment a holdings file arrives or is
+    // removed. Computed once per render and threaded through everywhere
+    // below (`select`'s options, `cycle`'s stops, `tabs`'s Buttons and width
+    // budget) rather than each call site rebuilding its own copy.
+    const stops = marketStops(config)
+    // A person can be PARKED on a pnl stop that this render's `stops` no
+    // longer includes - the holdings file was deleted, or `holdingsSource`
+    // flipped, while they were looking at it (see marketStops()'s own doc
+    // comment for what can make a stop disappear between renders). Nothing
+    // else clears `view` on its own, so a stranded pnl view would otherwise
+    // sit there forever showing the "沒有庫存資料" hint under a switcher
+    // that no longer offers a way back to it. Converging to that SAME
+    // market's table stop (not jumping markets, not resetting to `auto`)
+    // is the smallest change from what was on screen - the market itself
+    // did not go away, only its holdings did.
+    if (view === 'pnl') {
+      const curMarket = pickMarket(now, mode).market
+      const pnlStopStillExists = stops.some(s => s.market === curMarket && s.pnl)
+      if (!pnlStopStillExists) {
+        view = 'table'
+        resetPnlScroll()
+      }
+    }
+    // `cycle`'s own stop list, built off this same render's `stops` - shared
+    // by onCycle below (walking it) and the cycle-position math further down
+    // (`cyclePos`/`cycleStops.length` for the "n/total" label), so both read
+    // off the identical list rather than two `buildCycle(stops)` calls that
+    // could observe different `stops` if this ever moved between them.
+    const cycleStops = buildCycle(stops)
     const props = buildProps(now, config, quotesFor(pickMarket(now, mode).market, now), mode, view, focusCode)
     // buildProps chases focusCode to whatever position it actually landed on
     // (falling back to 0 when the code is unset, paged off, or gone from the
@@ -2698,7 +3411,15 @@ export const register: Register = on => {
     // own row directly above the table.
     //
     // The market button walks the whole cycle (buildCycle/nextCycleStop),
-    // not just the two markets - 美股 → (美股庫存) → 台股 → 台股庫存 → 美股.
+    // not just the markets - 台股 → [台股庫存] → 美股 → [美股庫存] →
+    // 加密貨幣 → 台股, marketStops()/`stops` order (a market's pnl stop only
+    // appears when it actually has holdings). This runs whenever the effective switcher
+    // style resolves to `cycle` (mobile's fallback, canSelect === false; an
+    // explicit `marketSwitcher: "cycle"`; or `tabs` too narrow to fit - see
+    // effectiveSwitcher below) - `select`/`tabs` pick the market+pnl stop
+    // directly through onSelectMarket instead, since neither has any use for
+    // a "next stop" to walk: a dropdown or a direct-target Button always
+    // jumps straight to whichever stop was picked.
     // `market`/`view` do not change here for any stop-internal reason (the
     // watchlist itself is unaffected by which stop is showing), so the feed
     // gating in feedOnce (which reads modeOverride's MARKET half only) never
@@ -2714,8 +3435,7 @@ export const register: Register = on => {
       turnSeq += 1
     }
     const onCycle = () => {
-      const hasUsHoldings = holdingsFor('us', lastHoldingsFile, config).holdings.length > 0
-      const nextStop = nextCycleStop({ market: props.market, pnl: props.view === 'pnl' }, hasUsHoldings)
+      const nextStop = nextCycleStop({ market: props.market, pnl: props.view === 'pnl' }, cycleStops)
       // A market switch starts the table back at page 0: the two markets'
       // page counts have no relation to each other, so carrying the old
       // index over lands on whichever page the new market's remainder
@@ -2734,6 +3454,36 @@ export const register: Register = on => {
       if (nextStop.pnl) turnPnl() // landing on a pnl stop flaps it in, like a mount
       // the market the button just landed on may never have been fetched: ask
       // for it now rather than showing demo prices until the next tick
+      if (!quotesFor(pickMarket(now, modeOverride).market, now)) requestFeed?.()
+      $.ui.invalidate('ui.render')
+    }
+    // The Select's onSelect: the market+pnl half of what onCycle above
+    // walks, both at once - an option's `value` packs them together (see
+    // marketSelectOptions()), so this splits it back apart rather than
+    // computing a "next stop" the way onCycle's buildCycle/nextCycleStop do.
+    // A dropdown names the destination directly, market AND view, in one
+    // pick - there is no separate holdings toggle left to press afterward.
+    // Reuses the same page-reset/pnl-reset/refetch steps onCycle already
+    // runs for a market change (see onCycle's own comments for why each one
+    // exists), so a pick behaves identically to the fallback button landing
+    // on the same stop.
+    const onSelectMarket = (value: string) => {
+      // Every value marketSelectOptions() hands out is a MarketSelectValue -
+      // see its own comment - so splitting on the literal ':pnl' suffix is
+      // exhaustive, not a guess.
+      const pnlStop = value.endsWith(':pnl')
+      const nextMarket = (pnlStop ? value.slice(0, -':pnl'.length) : value) as MarketId
+      const nextView: View = pnlStop ? 'pnl' : 'table'
+      if (nextMarket === props.market && nextView === props.view) return
+      // a market switch starts the table back at page 0, see onCycle's own
+      // comment - picking a different STOP on the same market (table <->
+      // pnl) leaves the table's own page alone, since the pnl view has no
+      // page of its own to collide with it (see holdingsScroll instead).
+      if (nextMarket !== props.market) page = 0
+      modeOverride = nextMarket
+      view = nextView
+      resetPnlScroll() // "changing the stop" always resets the pnl scroll position, same as onCycle
+      if (view === 'pnl') turnPnl() // landing on the pnl stop flaps it in, like a mount
       if (!quotesFor(pickMarket(now, modeOverride).market, now)) requestFeed?.()
       $.ui.invalidate('ui.render')
     }
@@ -2791,8 +3541,8 @@ export const register: Register = on => {
       $.ui.invalidate('ui.render')
     }
 
-    // The market button carries the market name ON THE BAND and nothing else:
-    // 台股 ▾ / 美股 ▾. It tracks the clock until the first press, then toggles.
+    // `open` tracks the clock until the first press on whichever
+    // market-switcher style is on screen, then toggles with it.
     const open = props.phase === 'open'
     // Three views, three names, so every line in the button row below can
     // read forwards: `table ? 元素 : null`, `chart ? 元素 : null`, `pnl ?
@@ -2801,14 +3551,66 @@ export const register: Register = on => {
     const chart = props.view === 'chart'
     const pnl = props.view === 'pnl'
     const table = props.view === 'table'
-    const marketLabel = marketButtonLabel(props.marketLabel, pnl)
+    // Which of the three switcher styles this render actually draws.
+    // `select` needs a real Select (canSelect) or it drops to `cycle`, the
+    // rule this already had; `tabs` needs its own five Buttons to fit next
+    // to the session state/hours and the right-side button group or it
+    // drops to `cycle` too - same direction as `select`'s fallback, so a
+    // style this environment/terminal cannot draw never fails silently into
+    // something broken, always into the one style every surface can draw.
+    // `cols` is measured up front (see its own definition above), so this
+    // check runs before anything else in the row has committed to a layout.
+    const requestedSwitcher = config.marketSwitcher
+    const tabsFit = tabsGroupWidth(stops) + RIGHT_BUTTON_GROUP_COLS <= cols
+    const switcher: MarketSwitcher =
+      requestedSwitcher === 'select' && !canSelect
+        ? 'cycle'
+        : requestedSwitcher === 'tabs' && !tabsFit
+          ? 'cycle'
+          : requestedSwitcher
+    // `cycleStops`'s own position, for `cycle`'s "n/total" label - `cycleStops`
+    // (built off this render's `stops`, see its own definition above) is
+    // recomputed every render (cheap, at most five entries) rather than
+    // cached, so a fresh stock-holdings.json or /reload-plugins changes the
+    // stops without a stale cycle surviving in closure state.
+    const cycleIdx = cycleStops.findIndex(s => s.market === props.market && s.pnl === pnl)
+    const cyclePos = (cycleIdx < 0 ? 0 : cycleIdx) + 1
+    // marketLabel is `cycle`'s own on-screen Button label when the switcher
+    // resolves there (mobile's fallback, an explicit `marketSwitcher:
+    // "cycle"`, or `tabs` collapsing for width); otherwise it is only
+    // `select`'s on-screen width proxy in the budget math right below,
+    // since there is no way to measure what the framework actually renders
+    // from inside the hook - a dropdown showing the same market name costs
+    // about the same columns as the button that used to carry it.
+    const marketLabel =
+      switcher === 'cycle'
+        ? cycleButtonLabel(props.marketLabel, pnl, cyclePos, cycleStops.length)
+        : marketButtonLabel(props.marketLabel, pnl)
+    // `tabs` swaps in its own multi-Button width instead of marketLabel's -
+    // see tabsGroupWidth's own comment for what it counts.
+    const marketControlWidth =
+      switcher === 'tabs'
+        ? tabsGroupWidth(stops)
+        : switcher === 'select'
+          ? dispWidth(MARKET_SELECT_LABEL) + SELECT_LABEL_CHROME_COLS + dispWidth(marketLabel)
+          : dispWidth(marketLabel)
+    // The Select's own `value`: crypto never reaches `pnl` (see
+    // marketStops()/onSelectMarket - there is no `crypto:pnl` stop to land
+    // on), so `props.market` alone already covers that case; tw/us fold the
+    // pnl stop into the packed `${market}:pnl` value the same way a stop's
+    // own `value` does, so the dropdown shows "美股庫存" rather than
+    // reverting to "美股" the moment 損益 is on screen. `tabs`'s own active-
+    // tab check (below) compares market/pnl directly instead of building
+    // this packed form, since it never has to round-trip through a string.
+    const marketSelectValue: MarketSelectValue = pnl && props.market !== 'crypto' ? `${props.market}:pnl` : props.market
     // 09:30-16:00 ET answers the wrong question in Taipei, so taipeiNote
     // restates it in local time - but only if it still fits: there is no way
     // to measure what the framework actually renders from inside the hook, so
     // this reserves a fixed budget for the button group on the right (see
     // RIGHT_BUTTON_GROUP_COLS) and drops the restatement first when it does not.
     const leftCoreWidth =
-      dispWidth(marketLabel) + 1 + dispWidth(`${open ? SUN : MOON} ${open ? '盤中' : '休市'}`) + 1 +
+      marketControlWidth +
+      1 + dispWidth(`${open ? SUN : MOON} ${open ? '盤中' : '休市'}`) + 1 +
       dispWidth(props.sessionNote)
     const showTaipei =
       table &&
@@ -2826,7 +3628,42 @@ export const register: Register = on => {
       <Box flexDirection="column">
         <Box flexDirection="row" justifyContent="space-between">
           <Box flexDirection="row">
-            <Button key="stock-band:market" label={marketLabel} onPress={onCycle} />
+            {switcher === 'select' ? (
+              <Select
+                key="stock-band:market"
+                label={MARKET_SELECT_LABEL}
+                options={marketSelectOptions(stops)}
+                value={marketSelectValue}
+                onSelect={onSelectMarket}
+              />
+            ) : switcher === 'tabs' ? (
+              // One Button per stop, marketStops()/`stops` order, each jumping
+              // straight to its own stop through onSelectMarket - the same state-switch
+              // function `select` uses, not a second copy of it. The stop
+              // actually on screen draws at full strength; every other stop
+              // stays dimColor (ButtonProps.dimColor: "dim at rest ... full
+              // strength under the pointer or the focus" - the same visual
+              // vocabulary a secondary control already uses elsewhere in
+              // this engine, borrowed here for "not the current tab" rather
+              // than "secondary action"). A one-column gap Text sits between
+              // each pair, the same explicit-gap convention this row already
+              // uses for session-state/hours/taipei (see leftCoreWidth) -
+              // tabsGroupWidth's own width budget counts these same gaps.
+              stops.flatMap((stop, i) => {
+                const active = stop.market === props.market && stop.pnl === pnl
+                const btn = (
+                  <Button
+                    key={`stock-band:market:${stop.value}`}
+                    label={tabLabel(stop)}
+                    dimColor={!active}
+                    onPress={() => onSelectMarket(stop.value)}
+                  />
+                )
+                return i === 0 ? [btn] : [<Text> </Text>, btn]
+              })
+            ) : (
+              <Button key="stock-band:market" label={marketLabel} onPress={onCycle} />
+            )}
             {/* The chart view's controls sit here, next to the symbol they move
                 through, rather than stranded on the far right where the eye is
                 not. The session state and hours give up the space because the

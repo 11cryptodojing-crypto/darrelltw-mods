@@ -2,8 +2,11 @@
 # One entry point for the scripts/dev harnesses that can fail: builds
 # register.tsx/board.tsx once, sets up disposable fixture projects under a
 # tmpdir (never inside the repo), runs feed-idle / chart-nav / rank-cross /
-# file-bars against them plus check-personal.sh, and prints a PASS/FAIL line
-# per check. Exits non-zero if any of them did.
+# file-bars / crypto-feed / crypto-sort / market-select against them
+# (crypto-feed, crypto-sort and market-select build their own stub config
+# in-process instead, so they need no fixture directory) plus
+# check-personal.sh, and prints a PASS/FAIL line per check. Exits non-zero if
+# any of them did.
 #
 # rank-cross and chart-nav's own "名次交叉" section are EXPECTED to fail right
 # now - they pin down a real, not-yet-fixed bug (PR-a: focus/was.code track a
@@ -128,6 +131,10 @@ run_check "feed-idle"      node "$SCRIPT_DIR/feed-idle.mjs"   "$OUT/register.js"
 run_check "chart-nav"      node "$SCRIPT_DIR/chart-nav.mjs"   "$OUT/register.js" "$FIXTURES/chart-nav"
 run_check "rank-cross"     node "$SCRIPT_DIR/rank-cross.mjs"  "$OUT/board.js" "$OUT/register.js" "$FIXTURES/rank-cross"
 run_check "file-bars"      node "$SCRIPT_DIR/file-bars.mjs"   "$OUT/register.js" "$OUT/board.js" "$FIXTURES/file-bars"
+run_check "crypto-feed"    node "$SCRIPT_DIR/crypto-feed.mjs" "$OUT/register.js"
+run_check "crypto-sort"    node "$SCRIPT_DIR/crypto-sort.mjs" "$OUT/register.js"
+run_check "market-select"  node "$SCRIPT_DIR/market-select.mjs" "$OUT/register.js"
+run_check "engine-rules"   bash "$SCRIPT_DIR/check-engine-rules.sh"
 run_check "check-personal" bash "$SCRIPT_DIR/check-personal.sh"
 
 echo
