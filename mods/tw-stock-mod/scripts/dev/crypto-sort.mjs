@@ -279,4 +279,18 @@ const TW_FIXTURE_LIST = [
   ok(props?.sorted === true, "(6) props.sorted reflects the FALLBACK ('change'), not the requested 'marketcap'")
 }
 
+// --- (7): a user-added crypto code with no CRYPTO_COINGECKO_ID entry (e.g.
+// PEPE) is left out of the CoinGecko request rather than silently reading
+// market cap 0, and the omission is logged exactly once ---------------------
+{
+  const { probe, cgCalls, logs } = await boot({
+    bandConfig: { market: 'crypto', crypto: [{ code: 'BTC' }, { code: 'PEPE' }] },
+  })
+  await probe()
+  ok(cgCalls.length === 1, `(7) fetchCryptoSupply still fires once (got ${cgCalls.length})`)
+  ok(!cgCalls[0].url.includes('PEPE'), `(7) the CoinGecko request URL does not contain the unmapped code PEPE - got ${cgCalls[0].url}`)
+  const pepeLogs = logs.filter(l => l.includes('PEPE'))
+  ok(pepeLogs.length === 1, `(7) exactly one log line mentions the unmapped code PEPE (got ${pepeLogs.length})`)
+}
+
 done()

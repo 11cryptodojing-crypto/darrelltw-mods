@@ -226,11 +226,14 @@ type SortKey = 'change' | 'list' | 'marketcap' | 'volume'
  * How the band lets a person jump between the market/holdings stops (see
  * marketStops()): `tabs` draws every stop as its own Button, `select`
  * draws the existing dropdown, `cycle` draws one Button that walks the
- * stops in order. `tabs` is the default (2026-09-19, at the user's request:
- * the Select's own reflow/highlight chrome is the engine's, not something
- * this mod can restyle - tabs and cycle are two config-switchable
- * alternatives to try instead). See parseConfigRoot for how a config file
- * picks one; an invalid value falls back to `tabs` rather than throwing.
+ * stops in order. `select` is the default. `tabs` was tried 2026-09-19 at
+ * the user's request (the Select's own reflow/highlight chrome is the
+ * engine's, not something this mod can restyle) and dropped after width
+ * measurements on a real terminal showed it does not reliably fit - see
+ * defaultConfig's own comment on marketSwitcher for the numbers. `tabs` and
+ * `cycle` stay as config-switchable alternatives. See parseConfigRoot for
+ * how a config file picks one; an invalid value falls back to `select`
+ * rather than throwing.
  */
 type MarketSwitcher = 'tabs' | 'select' | 'cycle'
 
@@ -338,10 +341,11 @@ const CRYPTO_LIST: Ticker[] = [
 // low/volume/amount/count, nothing else) - fetchCryptoSupply asks CoinGecko
 // instead, and CoinGecko's `id` is NOT the ticker code (BNB is
 // `binancecoin`, XRP is `ripple`, AVAX is `avalanche-2`, BCH is
-// `bitcoin-cash` - the rest happen to match their lowercase full name). This
-// table must stay in sync with CRYPTO_LIST by hand - add/remove a coin in
-// one and the same code must be added/removed here too, or its market-cap
-// sort silently falls back to 0 (see marketCapOf).
+// `bitcoin-cash` - the rest happen to match their lowercase full name). A
+// user's config.lists.crypto is not required to stay inside this table: a
+// code with no entry here is logged once per session (cryptoUnmappedWarned)
+// and its market cap reads 0, so it sorts last rather than crashing or
+// dropping off the list (see marketCapOf).
 const CRYPTO_COINGECKO_ID: Record<string, string> = {
   BTC: 'bitcoin',
   ETH: 'ethereum',
@@ -820,7 +824,7 @@ type Config = {
    * band whose Taiwan route is a live brokerage. Default `"file"`.
    */
   holdingsSource: 'file' | 'config'
-  /** which of the three market-switch control styles the band draws; default `'tabs'` - see MarketSwitcher's own comment */
+  /** which of the three market-switch control styles the band draws; default `'select'` - see MarketSwitcher's own comment */
   marketSwitcher: MarketSwitcher
 }
 
@@ -1133,7 +1137,7 @@ function parseConfigRoot(root: Record<string, unknown> | undefined): Config {
   const marketSwitcher = root.marketSwitcher
   if (marketSwitcher === 'tabs' || marketSwitcher === 'select' || marketSwitcher === 'cycle') {
     cfg.marketSwitcher = marketSwitcher
-  } // anything else (including the default '貓'-style typo) keeps defaultConfig()'s 'tabs'
+  } // anything else (including the default '貓'-style typo) keeps defaultConfig()'s 'select'
   return cfg
 }
 
@@ -2036,6 +2040,7 @@ let cryptoSupply: Record<string, number> = {}
 let cryptoSupplyFetchedAt = 0 // 0 means "never fetched" - always due
 let cryptoSupplyCooldownUntil = 0 // set after a failed/empty CoinGecko answer
 let cryptoSupplyWarned = false // this session's one-time "falling back to volume" log
+let cryptoUnmappedWarned = false // this session's one-time "no CoinGecko id for ..." log
 let feedSeq = 0 // one per snapshot the feed accepted; drives the board's live dot
 let nextFeedAt = 0 // when the next request is due; the board counts down to it
 let barsInFlight = false
@@ -2846,7 +2851,17 @@ export const register: Register = on => {
     const fetchCryptoSupply = async (now: number) => {
       if (now < cryptoSupplyCooldownUntil) return
       if (cryptoSupplyFetchedAt !== 0 && now - cryptoSupplyFetchedAt < CRYPTO_SUPPLY_TTL_MS) return
-      const ids = Object.values(CRYPTO_COINGECKO_ID)
+      // Same list feedCrypto itself fetches (watchlist + holdings extras) -
+      // NOT the hardcoded CRYPTO_COINGECKO_ID map, or a user-added coin not
+      // in that map would never even try CoinGecko and would just sort last
+      // with no explanation why.
+      const list = [...config.lists.crypto, ...holdingExtras('crypto', config.lists.crypto, config)]
+      const unmapped = [...new Set(list.filter(t => !CRYPTO_COINGECKO_ID[t.code]).map(t => t.code))]
+      if (unmapped.length > 0 && !cryptoUnmappedWarned) {
+        cryptoUnmappedWarned = true
+        $.ui.log(`tw-stock-mod: no CoinGecko id for ${unmapped.join(', ')} - market-cap sort puts them last`)
+      }
+      const ids = [...new Set(list.map(t => CRYPTO_COINGECKO_ID[t.code]).filter(Boolean))]
       if (ids.length === 0) return
       const warnOnce = () => {
         // Only warn while the cache is still empty - once a real fetch has
@@ -2859,7 +2874,11 @@ export const register: Register = on => {
         $.ui.log('tw-stock-mod: market-cap data (CoinGecko) unavailable this session, sorting crypto by volume instead')
       }
       try {
-        const url = `${COINGECKO_MARKETS_URL}?vs_currency=usd&ids=${ids.join(',')}`
+        // per_page=250: measured 2026-09-19 that this endpoint's default
+        // page is 100 rows, so 101+ ids would be silently truncated; 250 is
+        // CoinGecko's documented max page size (unmeasured against a list
+        // that large).
+        const url = `${COINGECKO_MARKETS_URL}?vs_currency=usd&ids=${ids.join(',')}&per_page=250`
         const res = await $.http.fetch(url)
         if (!res.ok) {
           cryptoSupplyCooldownUntil = now + CRYPTO_SUPPLY_COOLDOWN_MS
@@ -3659,7 +3678,7 @@ export const register: Register = on => {
                     onPress={() => onSelectMarket(stop.value)}
                   />
                 )
-                return i === 0 ? [btn] : [<Text> </Text>, btn]
+                return i === 0 ? [btn] : [<Text key={`stock-band:market:gap:${stop.value}`}> </Text>, btn]
               })
             ) : (
               <Button key="stock-band:market" label={marketLabel} onPress={onCycle} />
