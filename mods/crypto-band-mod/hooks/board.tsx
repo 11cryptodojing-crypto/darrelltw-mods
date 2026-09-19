@@ -11,17 +11,26 @@ type TextTag = ClientElements['Text']
 // This is tw-stock-mod's board.tsx with everything that assumed a
 // multi-market, session-based table (TW/US switching, open/closed hours,
 // the K-bar chart view, the 損益 holdings view, the Solari index footer)
-// removed. What is kept, per the crypto-band-mod brief: the table, two-
-// column layout, paging, sort, and the split-flap row-turn animation and
-// color scheme.
+// removed. What is kept, per the crypto-band-mod brief: the table, paging,
+// sort, and the split-flap row-turn animation and color scheme.
+//
+// Every row also carries `origin` (固定/熱門): once the watchlist can hold
+// CoinGecko's trending coins on top of the fixed ones, a row needs to say
+// which kind it is. That single word is what killed the old two-coins-a-row
+// layout tw-stock-mod's board had for a >5-coin watchlist - fitting 幣種 +
+// 固定/熱門 + 價格 + 1h% + 24h% + 24h量 twice across one terminal row was
+// never going to be legible, so this board only ever draws one column now
+// and pages instead (see PAGE_SIZE in register.tsx).
 //
 // Never name a local variable `h`: every JSX tag in this file compiles to h(...).
 
 export type SortKey = 'change24h' | 'change1h' | 'volume' | 'list'
+export type CoinOrigin = 'fixed' | 'trending'
 
 export type QuoteRow = {
   id: string
   symbol: string
+  origin: CoinOrigin
   price: number
   pct1h: number
   pct24h: number
@@ -34,8 +43,6 @@ export type QuoteRow = {
 
 export type BoardProps = {
   quotes: QuoteRow[]
-  /** 1 = single-column table (幣種/價格/1h%/24h%/24h量); 2 = two coins a row (幣種/價格/24h% only) */
-  columns: 1 | 2
   sortKey: SortKey
   /** whether the active sort key gets an arrow on its header cell */
   sorted: boolean
@@ -162,7 +169,6 @@ const frameClocks = new WeakMap<object, { ms: number; cancel: () => void }>()
 
 const TABLE_ROWS = 8 // header, rule, 5 quote rows, footer
 const TABLE_QUOTE_ROWS = 5
-const MAX_TABLE_QUOTES = TABLE_QUOTE_ROWS * 2 // two-column mode holds 2 coins a row
 
 function charWidth(ch: string): number {
   const cp = ch.codePointAt(0) ?? 0
@@ -294,37 +300,6 @@ function layout(width: number): Layout {
   return { symCol: 1, priceCol, priceRight, pct1hRight, pct24hRight, volRight }
 }
 
-// Two coins per row, when the page holds more than 5 (register.tsx decides
-// when; see BoardProps.columns). 1h% and 24h量 have no room next to a
-// second coin, so each half only carries 幣種/價格/24h%.
-type HalfLayout = { symCol: number; priceCol: number; priceRight: number; pct24hRight: number }
-
-const TWO_COL_MAX = 96 // two halves need more room than one table's 78-column cap
-const TWO_COL_GUTTER = 6 // clear columns between the halves
-// Half-width floor: 幣種 (up to 4 chars + gap, 6) + widest price e.g.
-// "123,456.78" + gap (11) + widest 24h% e.g. "▲ +100.00%" + gap (11) = 28.
-const MIN_HALF_WIDTH = 28
-const MIN_TWO_COL_WIDTH = MIN_HALF_WIDTH * 2 + TWO_COL_GUTTER
-
-function layout2(width: number): [HalfLayout, HalfLayout] {
-  const cap = Math.min(width - 1, TWO_COL_MAX)
-  const halfW = Math.floor((cap - TWO_COL_GUTTER) / 2)
-  const mkHalf = (leftEdge: number): HalfLayout => {
-    const pct24hRight = leftEdge + halfW
-    const priceRight = pct24hRight - 11
-    const priceCol = priceRight - 9
-    return { symCol: leftEdge, priceCol, priceRight, pct24hRight }
-  }
-  const left = mkHalf(1)
-  const right = mkHalf(left.pct24hRight + 1 + TWO_COL_GUTTER)
-  return [left, right]
-}
-
-/** whether a terminal this wide can lay out two readable halves */
-function fitsTwoColumns(width: number): boolean {
-  return Math.min(width - 1, TWO_COL_MAX) >= MIN_TWO_COL_WIDTH
-}
-
 /** a numeric field mid-turn, right-anchored; both texts share one padded width so the column never jitters */
 function flapRight(row: Row, right: number, from: string, to: string, fg: string, turn: number, left: number, stagger = STAGGER) {
   const width = Math.max(dispWidth(from), dispWidth(to))
@@ -344,19 +319,15 @@ function drawSymbolCell(r: Row, symCol: number, q: QuoteRow, rowStart: number, t
   }
 }
 
-/** one coin inside a two-column table row: 幣種/價格/24h% only, at the given half's own columns */
-function drawTwoColQuote(r: Row, half: HalfLayout, q: QuoteRow, rowTurn: number, slot: number): void {
-  const turned = q.was?.id !== undefined
-  const rowStart = turned ? rowTurn - slot * PAGE_ROW_STAGGER : RESTING
-  drawSymbolCell(r, half.symCol, q, rowStart, turned)
+const ORIGIN_LABEL: Record<CoinOrigin, string> = { fixed: '固定', trending: '熱門' }
+const ORIGIN_COLOR: Record<CoinOrigin, string> = { fixed: DIM, trending: ORANGE }
 
-  const color = tone(q.pct24h)
-  const turn = q.was ? rowTurn - slot * (turned ? PAGE_ROW_STAGGER : ROW_STAGGER) : RESTING
-  const was = q.was ?? q
-  const stagger = turned ? 0 : STAGGER
-  const dec = priceDecimals(q.price)
-  flapRight(r, half.priceRight, thousands(was.price, dec), thousands(q.price, dec), WHITE, turn, half.priceCol, stagger)
-  flapRight(r, half.pct24hRight, pctText(was.pct24h), pctText(q.pct24h), color, turn, half.priceCol, stagger)
+/** the 固定/熱門 tag right after the symbol - static (not flapped), and only drawn if it fits before priceCol */
+function drawOriginTag(r: Row, q: QuoteRow, priceCol: number): void {
+  const tagCol = r.width() + 1
+  const label = ORIGIN_LABEL[q.origin]
+  if (tagCol + dispWidth(label) >= priceCol - 1) return
+  r.put(tagCol, label, ORIGIN_COLOR[q.origin])
 }
 
 type TailPiece = { text: string; fg: string }
@@ -465,31 +436,21 @@ export default function CryptoBandBoard(props: BoardProps | undefined, surface: 
 
   const lay = layout(surface.columns || 80)
   const rows = Array.from({ length: TABLE_ROWS }, () => new Row())
-  const quotes = props.quotes.slice(0, MAX_TABLE_QUOTES)
+  const quotes = props.quotes.slice(0, TABLE_QUOTE_ROWS)
+  const rightEdge = lay.volRight
 
   const sourceTag = props.stale ? `資料延遲 · 更新 ${hhmmss(props.lastUpdateAt)}` : 'CoinGecko 即時'
   const sourceTagShort = props.stale ? '資料延遲' : 'CoinGecko'
   const fullTag = props.version ? `${sourceTag} · ${props.version}` : sourceTag
 
-  const halves = props.columns === 2 && fitsTwoColumns(surface.columns || 80) ? layout2(surface.columns || 80) : undefined
-  const rightEdge = halves ? halves[1].pct24hRight : lay.volRight
-
   const arrowFor = (key: SortKey, label: string) => (props.sorted && props.sortKey === key ? `↓${label}` : label)
 
   const head = rows[0]
-  if (halves) {
-    for (const half of halves) {
-      head.put(half.symCol, '幣種', HEAD)
-      head.putRight(half.priceRight, '價格', HEAD)
-      head.putRight(half.pct24hRight, arrowFor('change24h', '24h%'), HEAD)
-    }
-  } else {
-    head.put(lay.symCol, '幣種', HEAD)
-    head.putRight(lay.priceRight, '價格', HEAD)
-    head.putRight(lay.pct1hRight, arrowFor('change1h', '1h%'), HEAD)
-    head.putRight(lay.pct24hRight, arrowFor('change24h', '24h%'), HEAD)
-    head.putRight(lay.volRight, arrowFor('volume', '24h量'), HEAD)
-  }
+  head.put(lay.symCol, '幣種', HEAD)
+  head.putRight(lay.priceRight, '價格', HEAD)
+  head.putRight(lay.pct1hRight, arrowFor('change1h', '1h%'), HEAD)
+  head.putRight(lay.pct24hRight, arrowFor('change24h', '24h%'), HEAD)
+  head.putRight(lay.volRight, arrowFor('volume', '24h量'), HEAD)
 
   // the rule doubles as the page indicator
   const pageTag = props.pageCount > 1 ? ` ${props.page + 1}/${props.pageCount} ` : ''
@@ -497,43 +458,30 @@ export default function CryptoBandBoard(props: BoardProps | undefined, surface: 
   rows[1].put(lay.symCol, '─'.repeat(ruleW), RULE)
   if (pageTag) rows[1].put(rows[1].width(), pageTag, DIM)
 
-  const single = halves ? [] : quotes.slice(0, TABLE_QUOTE_ROWS)
   let topMover = 0
-  for (let i = 1; i < single.length; i++) {
-    if (Math.abs(single[i].pct24h) > Math.abs(single[topMover].pct24h)) topMover = i
+  for (let i = 1; i < quotes.length; i++) {
+    if (Math.abs(quotes[i].pct24h) > Math.abs(quotes[topMover].pct24h)) topMover = i
   }
 
-  if (halves) {
-    // Column-major off the existing sort: the left half is ranks 1..5, the
-    // right half ranks 6..10 - no single "this row" to stripe when it can
-    // hold two unrelated coins, so the top-mover highlight is single-column only.
-    for (let i = 0; i < TABLE_QUOTE_ROWS; i++) {
-      const r = rows[2 + i]
-      const left = quotes[i]
-      const right = quotes[i + TABLE_QUOTE_ROWS]
-      if (left) drawTwoColQuote(r, halves[0], left, rowTurn, i)
-      if (right) drawTwoColQuote(r, halves[1], right, rowTurn, i)
-    }
-  } else {
-    for (let i = 0; i < single.length; i++) {
-      const q = single[i]
-      const r = rows[2 + i]
-      const turned = q.was?.id !== undefined
-      const rowStart = turned ? rowTurn - i * PAGE_ROW_STAGGER : RESTING
-      drawSymbolCell(r, lay.symCol, q, rowStart, turned)
+  for (let i = 0; i < quotes.length; i++) {
+    const q = quotes[i]
+    const r = rows[2 + i]
+    const turned = q.was?.id !== undefined
+    const rowStart = turned ? rowTurn - i * PAGE_ROW_STAGGER : RESTING
+    drawSymbolCell(r, lay.symCol, q, rowStart, turned)
+    drawOriginTag(r, q, lay.priceCol)
 
-      const color = tone(q.pct24h)
-      const turn = q.was ? rowTurn - i * (turned ? PAGE_ROW_STAGGER : ROW_STAGGER) : RESTING
-      const was = q.was ?? q
-      const left = lay.priceCol
-      const stagger = turned ? 0 : STAGGER
-      const dec = priceDecimals(q.price)
-      flapRight(r, lay.priceRight, thousands(was.price, dec), thousands(q.price, dec), WHITE, turn, left, stagger)
-      flapRight(r, lay.pct1hRight, pctText(was.pct1h), pctText(q.pct1h), tone(q.pct1h), turn, left, stagger)
-      flapRight(r, lay.pct24hRight, pctText(was.pct24h), pctText(q.pct24h), color, turn, left, stagger)
-      flapRight(r, lay.volRight, compactUsd(was.volume24h), compactUsd(q.volume24h), DIM, turn, left, stagger)
-      if (props.highlight && i === topMover) r.fillBg(ROW_HILIGHT, lay.volRight)
-    }
+    const color = tone(q.pct24h)
+    const turn = q.was ? rowTurn - i * (turned ? PAGE_ROW_STAGGER : ROW_STAGGER) : RESTING
+    const was = q.was ?? q
+    const left = lay.priceCol
+    const stagger = turned ? 0 : STAGGER
+    const dec = priceDecimals(q.price)
+    flapRight(r, lay.priceRight, thousands(was.price, dec), thousands(q.price, dec), WHITE, turn, left, stagger)
+    flapRight(r, lay.pct1hRight, pctText(was.pct1h), pctText(q.pct1h), tone(q.pct1h), turn, left, stagger)
+    flapRight(r, lay.pct24hRight, pctText(was.pct24h), pctText(q.pct24h), color, turn, left, stagger)
+    flapRight(r, lay.volRight, compactUsd(was.volume24h), compactUsd(q.volume24h), DIM, turn, left, stagger)
+    if (props.highlight && i === topMover) r.fillBg(ROW_HILIGHT, lay.volRight)
   }
 
   // row 7: the clock the last good snapshot was taken at, its live dot (frozen

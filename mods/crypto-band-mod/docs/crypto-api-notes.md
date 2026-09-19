@@ -13,7 +13,32 @@ No API key, no account (verified 2026-09-19: HTTP 200 with no auth header on
 the public `api.coingecko.com` host). One request answers every configured
 coin at once - `coins/markets` has no per-request id cap the way Yahoo's
 spark endpoint caps a request at 20 symbols, so `hooks/register.tsx` never
-has to batch it.
+has to batch it. `ids` is `fixedCoins` and the current trending selection
+merged together (see `activeCoins()`) - trending coins are never fetched in
+a separate request.
+
+## Where the trending coins come from
+
+```
+GET https://api.coingecko.com/api/v3/search/trending
+```
+
+Also no API key, no account. Answers (at the time of writing) the top 15
+trending searches on CoinGecko, ranked, as `coins[].item.{id,symbol,...}`.
+`hooks/register.tsx` polls this on its own clock (`trendingRefreshMs`,
+default 10 minutes) - much slower than the price feed, since "trending"
+does not need to be fresher than that, and separate from it, since a UI
+redraw must never itself trigger an API request (see `trendingFeed` and
+`buildProps`). Only `id` and `symbol` are read from each item; this
+endpoint is never trusted for price - `coins/markets` still owns that.
+
+`selectTrending` (in `hooks/register.tsx`) takes the raw ranked list from
+the last successful trending fetch (`trendingRaw`) and, at merge time
+rather than at fetch time, drops anything already in `fixedCoins`, anything
+whose ticker is in `excludedCoins`, and caps the rest at `trendingLimit`.
+Doing the filtering at merge time means a config change to
+`fixedCoins`/`excludedCoins`/`trendingLimit` takes effect on the next
+render instead of waiting up to 10 minutes for the next trending poll.
 
 ## Why this one endpoint covers the whole table
 
@@ -54,3 +79,11 @@ and flags it 資料延遲 (`BoardProps.stale`) until a request succeeds again.
 Unlike tw-stock-mod, there is no demo-price sine-walk fallback anywhere in
 this module: before the first successful fetch, the board draws nothing
 (`crypto-band: 等待報價中…`) rather than a placeholder price.
+
+The same rule applies to the trending list: a failed `search/trending`
+request leaves `trendingRaw` exactly as it was (see `parseTrending`'s
+contract - it only returns `undefined`, never touching state, on a genuine
+parse failure). On the very first launch, if that first trending fetch
+fails before ever succeeding, `trendingRaw` is still its initial empty
+array, so the merged watchlist is just `fixedCoins` - never a fabricated
+trending list either.

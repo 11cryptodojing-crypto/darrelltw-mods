@@ -10,10 +10,19 @@ import type { Register } from 'claude-code'
 // Prices come from CoinGecko's public `coins/markets` endpoint - no API
 // key, no account (see COINGECKO_MARKETS_URL below). One request a tick
 // answers price, 1h%, 24h% and 24h volume for every configured coin at
-// once. A failed request NEVER produces a made-up price: the board keeps
-// the last successful snapshot on screen and flags it 資料延遲 (see
-// `feedHealthy` and BoardProps.stale in board.tsx) until a request
+// once, fixed coins and trending coins combined into a single `ids` list -
+// see `activeCoins`. A failed request NEVER produces a made-up price: the
+// board keeps the last successful snapshot on screen and flags it 資料延遲
+// (see `feedHealthy` and BoardProps.stale in board.tsx) until a request
 // succeeds again. There is no demo-price fallback anywhere in this module.
+//
+// On top of the fixed watchlist, this module also polls CoinGecko's public
+// `search/trending` endpoint on its own, much slower clock (`trendingRefreshMs`,
+// default 10 minutes) to fill the rest of the table with whatever is
+// currently trending - see `trendingFeedOnce`/`activeCoins`. A failed
+// trending request keeps the last successful trending list (never clears
+// it, never invents one); before the first successful trending fetch the
+// table shows only the fixed coins.
 //
 // This module never calls $.model.* and never touches the prompt: it polls
 // CoinGecko on its own clock, builds a quote snapshot, and draws a Client
@@ -33,13 +42,12 @@ const FEED_MS_DEFAULT = 30_000
 const FEED_MS_MIN = 30_000
 const FEED_BACKOFF_MAX_MS = 300_000
 const SNOOZE_MS = 30 * 60 * 1000
-const PAGE_SIZE_1COL = 5
-const PAGE_SIZE_2COL = 10
+const PAGE_SIZE = 5
 const PAGE_MS_DEFAULT = 10_000
 const PAGE_MS_MIN = 4000
 const PAGE_TURN_WINDOW_MS = 2500 // how long after a page/sort turn the outgoing rows are still worth turning from
 const TABLE_BOARD_ROWS = 8
-const MAX_COINS = 30
+const MAX_FIXED_COINS = 30
 const DIM = '#6e7681'
 
 // CoinGecko's free `coins/markets` endpoint - no API key needed (verified
@@ -51,17 +59,42 @@ const DIM = '#6e7681'
 // there is no batching to do here.
 const COINGECKO_MARKETS_URL = 'https://api.coingecko.com/api/v3/coins/markets'
 
+// CoinGecko's free `search/trending` endpoint - also no API key. Answers
+// (at the time of writing) the current top-15 trending coins, ranked, under
+// `coins[].item.{id,symbol,...}`. This module never trusts it for price -
+// only for which coin ids are "trending" right now; the price still comes
+// from the one coins/markets request above.
+const COINGECKO_TRENDING_URL = 'https://api.coingecko.com/api/v3/search/trending'
+
+const TRENDING_MS_DEFAULT = 600_000 // 10 minutes - "熱門名單每 10 分鐘更新一次"
+// A config typo should not turn this into a second tight polling loop next
+// to the price feed; trending data does not need to be fresher than this.
+const TRENDING_MS_MIN = 60_000
+const TRENDING_LIMIT_DEFAULT = 10
+const TRENDING_LIMIT_MAX = 15 // CoinGecko's trending endpoint answers at most 15
+// Stablecoins are never "trending" in the sense this table cares about -
+// their price barely moves, so they would just sit on the board doing
+// nothing while crowding out an actual mover. Matched against the
+// uppercased ticker CoinGecko reports for a trending item, not the coin id.
+const DEFAULT_EXCLUDED_COINS = ['USDT', 'USDC', 'DAI', 'FDUSD', 'USDE', 'USDS']
+
 type SortKey = 'change24h' | 'change1h' | 'volume' | 'list'
-type ColumnMode = 'auto' | 1 | 2
+type CoinOrigin = 'fixed' | 'trending'
 
 /** a config entry: a CoinGecko coin id, plus an optional display override for its ticker */
 type CoinConfig = { id: string; symbol?: string }
 
-// bitcoin/ethereum/solana/hyperliquid are the four v1 tracks; the id is what
-// CoinGecko keys its answer by, and `symbol` is left unset so the board
-// takes CoinGecko's own `symbol` field (already BTC/ETH/SOL/HYPE for these
-// four) rather than duplicating it here.
-const DEFAULT_COINS: CoinConfig[] = [
+/** one coin currently on the watchlist, fixed or trending, after fixedCoins/trending have been merged and deduped */
+type CoinEntry = { id: string; symbol?: string; origin: CoinOrigin }
+
+/** one row of CoinGecko's `search/trending` answer, kept only as long as it stays useful (see `trendingRaw`) */
+type TrendingHit = { id: string; symbol: string }
+
+// bitcoin/ethereum/solana/hyperliquid are the four coins that always stay on
+// the board - the id is what CoinGecko keys its answer by, and `symbol` is
+// left unset so the board takes CoinGecko's own `symbol` field (already
+// BTC/ETH/SOL/HYPE for these four) rather than duplicating it here.
+const DEFAULT_FIXED_COINS: CoinConfig[] = [
   { id: 'bitcoin' },
   { id: 'ethereum' },
   { id: 'solana' },
@@ -71,6 +104,7 @@ const DEFAULT_COINS: CoinConfig[] = [
 type QuoteRow = {
   id: string
   symbol: string
+  origin: CoinOrigin
   price: number
   pct1h: number
   pct24h: number
@@ -81,18 +115,25 @@ type QuoteRow = {
 type Config = {
   /** how often this module re-reads crypto-band.json and re-renders; does not touch CoinGecko */
   refreshMs: number
-  /** seconds between CoinGecko requests, in ms; clamped to FEED_MS_MIN and up */
+  /** seconds between CoinGecko coins/markets requests, in ms; clamped to FEED_MS_MIN and up */
   feedMs: number
   sort: SortKey
   highlight: boolean
-  /** how many coins the table draws per row; "auto" picks 1 for <=5 coins, 2 for more - see effectiveColumns */
-  columns: ColumnMode
   /** how long one page holds before the board turns; 0 = manual only (no 翻頁 auto-advance) */
   pageMs: number
   /** `full` flaps and steps the live dot; `off` leaves the board still and repaints once a second for the countdown */
   animation: 'full' | 'off'
   countdown: boolean
-  coins: CoinConfig[]
+  /** coins that are always on the board, regardless of what is trending */
+  fixedCoins: CoinConfig[]
+  /** whether the rest of the table is filled from CoinGecko's trending list */
+  trendingEnabled: boolean
+  /** how many trending coins (after excludedCoins/fixedCoins de-dup) to keep, out of the up-to-15 the API answers */
+  trendingLimit: number
+  /** how often the trending list itself is refreshed, in ms; clamped to TRENDING_MS_MIN and up - unrelated to feedMs */
+  trendingRefreshMs: number
+  /** tickers (e.g. stablecoins) that never count as "trending", matched case-insensitively */
+  excludedCoins: string[]
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -116,9 +157,9 @@ function parseJsonRecord(text: string | undefined): Record<string, unknown> | un
   }
 }
 
-/** `coins` in crypto-band.json: an array of CoinGecko ids, either bare strings or `{id, symbol}` objects */
-function parseCoins(value: unknown): CoinConfig[] {
-  if (!Array.isArray(value)) return DEFAULT_COINS
+/** `fixedCoins` in crypto-band.json: an array of CoinGecko ids, either bare strings or `{id, symbol}` objects */
+function parseFixedCoins(value: unknown): CoinConfig[] {
+  if (!Array.isArray(value)) return DEFAULT_FIXED_COINS
   const out: CoinConfig[] = []
   for (const raw of value) {
     if (typeof raw === 'string') {
@@ -130,9 +171,19 @@ function parseCoins(value: unknown): CoinConfig[] {
       const symbol = typeof entry?.symbol === 'string' && entry.symbol ? entry.symbol.toUpperCase() : undefined
       out.push({ id, ...(symbol ? { symbol } : {}) })
     }
-    if (out.length >= MAX_COINS) break
+    if (out.length >= MAX_FIXED_COINS) break
   }
-  return out.length > 0 ? out : DEFAULT_COINS
+  return out.length > 0 ? out : DEFAULT_FIXED_COINS
+}
+
+/** `excludedCoins` in crypto-band.json: tickers, not CoinGecko ids - trending items are matched by their `symbol` */
+function parseExcludedCoins(value: unknown): string[] {
+  if (!Array.isArray(value)) return DEFAULT_EXCLUDED_COINS
+  const out: string[] = []
+  for (const raw of value) {
+    if (typeof raw === 'string' && raw.trim()) out.push(raw.trim().toUpperCase())
+  }
+  return out.length > 0 ? out : DEFAULT_EXCLUDED_COINS
 }
 
 function defaultConfig(): Config {
@@ -141,11 +192,14 @@ function defaultConfig(): Config {
     feedMs: FEED_MS_DEFAULT,
     sort: 'change24h',
     highlight: true,
-    columns: 'auto',
     pageMs: PAGE_MS_DEFAULT,
     animation: 'full',
     countdown: true,
-    coins: DEFAULT_COINS,
+    fixedCoins: DEFAULT_FIXED_COINS,
+    trendingEnabled: true,
+    trendingLimit: TRENDING_LIMIT_DEFAULT,
+    trendingRefreshMs: TRENDING_MS_DEFAULT,
+    excludedCoins: DEFAULT_EXCLUDED_COINS,
   }
 }
 
@@ -159,27 +213,21 @@ function parseConfigRoot(root: Record<string, unknown> | undefined): Config {
     cfg.sort = root.sort
   }
   if (root.highlight === false) cfg.highlight = false
-  if (root.columns === 1 || root.columns === 2 || root.columns === 'auto') cfg.columns = root.columns
   const pageMs = num(root.pageMs, cfg.pageMs)
   cfg.pageMs = pageMs <= 0 ? 0 : Math.max(PAGE_MS_MIN, pageMs)
   if (root.animation === 'off' || root.animation === false) cfg.animation = 'off'
   if (root.countdown === false) cfg.countdown = false
-  if (root.coins !== undefined) cfg.coins = parseCoins(root.coins)
+  if (root.fixedCoins !== undefined) cfg.fixedCoins = parseFixedCoins(root.fixedCoins)
+  if (typeof root.trendingEnabled === 'boolean') cfg.trendingEnabled = root.trendingEnabled
+  cfg.trendingLimit = Math.max(1, Math.min(TRENDING_LIMIT_MAX, Math.round(num(root.trendingLimit, cfg.trendingLimit))))
+  cfg.trendingRefreshMs = Math.max(TRENDING_MS_MIN, num(root.trendingRefreshMs, cfg.trendingRefreshMs))
+  if (root.excludedCoins !== undefined) cfg.excludedCoins = parseExcludedCoins(root.excludedCoins)
   return cfg
 }
 
-/** how many requests-per-second this session may spend: always 1 per tick, whatever the coin list holds - CoinGecko answers the whole `ids` list in one call */
+/** how often coins/markets is polled, whatever the combined fixed+trending coin count - CoinGecko answers the whole `ids` list in one call */
 function feedInterval(cfg: Config): number {
   return Math.max(cfg.feedMs, FEED_MS_MIN)
-}
-
-/** resolves `"auto"` off the watchlist length; an explicit 1/2 always wins */
-function effectiveColumns(cfg: Config, listLength: number): 1 | 2 {
-  if (cfg.columns === 1 || cfg.columns === 2) return cfg.columns
-  return listLength > PAGE_SIZE_1COL ? 2 : 1
-}
-function pageSize(columns: 1 | 2): number {
-  return columns === 2 ? PAGE_SIZE_2COL : PAGE_SIZE_1COL
 }
 
 type MarketsRow = { price: number; pct1h: number; pct24h: number; volume24h: number; symbol: string }
@@ -211,14 +259,60 @@ function parseMarkets(text: string): Record<string, MarketsRow> {
   return out
 }
 
+/**
+ * The `search/trending` answer, ranked as CoinGecko returns it. Returns
+ * `undefined` only on a genuine parse failure (bad JSON, or no `coins`
+ * array at all) - an empty array is a legitimate "nothing trending" answer,
+ * not a failure, and must not trigger the "keep the last good list" path.
+ */
+function parseTrending(text: string): TrendingHit[] | undefined {
+  let body: unknown
+  try {
+    body = JSON.parse(text)
+  } catch {
+    return undefined
+  }
+  const root = asRecord(body)
+  const list = root?.coins
+  if (!Array.isArray(list)) return undefined
+  const out: TrendingHit[] = []
+  for (const raw of list) {
+    const entry = asRecord(raw)
+    const item = entry ? asRecord(entry.item) : undefined
+    const id = str(item?.id, '')
+    if (!id) continue
+    out.push({ id, symbol: str(item?.symbol, id).toUpperCase() })
+  }
+  return out
+}
+
+/**
+ * Filtering (fixed-coin de-dup, excludedCoins, trendingLimit) is applied
+ * here, at merge time, off the raw ranked list from the last successful
+ * `search/trending` fetch - not baked into `trendingRaw` itself. That way a
+ * config change to fixedCoins/excludedCoins/trendingLimit takes effect on
+ * the next render instead of waiting for the next 10-minute trending poll.
+ */
+function selectTrending(raw: TrendingHit[], fixedIds: Set<string>, excluded: Set<string>, limit: number): TrendingHit[] {
+  const out: TrendingHit[] = []
+  const seen = new Set<string>()
+  for (const hit of raw) {
+    if (out.length >= limit) break
+    if (fixedIds.has(hit.id) || seen.has(hit.id) || excluded.has(hit.symbol)) continue
+    seen.add(hit.id)
+    out.push(hit)
+  }
+  return out
+}
+
 // --- module state (memory only: a fresh session starts unsnoozed) ----------
 let ready = false
 let config: Config = defaultConfig()
-// the last known-good row per coin, in config.coins order - NEVER cleared on
-// a failed fetch (see feedOnce/backOff): this is the "last successful data"
-// requirement 10 asks for.
+// the last known-good row per coin, in activeCoins() order - NEVER cleared
+// on a failed fetch (see feedOnce/backOff): this is the "last successful
+// data" requirement asks for.
 let quotes: QuoteRow[] = []
-let lastUpdateAt = 0 // epoch ms of the last SUCCESSFUL fetch; 0 = never
+let lastUpdateAt = 0 // epoch ms of the last SUCCESSFUL coins/markets fetch; 0 = never
 let feedHealthy = true // false from the moment a fetch fails until the next one succeeds
 let feedSeq = 0 // bumped once per successful fetch; the board's live dot steps on it
 let feedFailures = 0
@@ -229,6 +323,13 @@ let unmappedWarned = false // this session's one-time "CoinGecko has no data for
 let version = ''
 let snoozedUntil = 0
 let sortOverride: SortKey | undefined // set by the 排序 button; undefined = config.sort
+
+// the last successful `search/trending` answer, ranked, before any
+// fixedCoins/excludedCoins/trendingLimit filtering - NEVER cleared on a
+// failed fetch, and empty (not fabricated) until the first one succeeds, so
+// a first-launch trending failure just leaves the board on fixed coins only.
+let trendingRaw: TrendingHit[] = []
+let trendingInFlight = false
 
 // --- paging ------------------------------------------------------------
 let page = 0
@@ -267,9 +368,18 @@ function autoPage(now: number) {
   setPage((page + 1) % pageCount(), now)
 }
 
+/** fixedCoins, plus (if enabled) the current trending selection, de-duped by coin id - fixed coins always win a collision */
+function activeCoins(): CoinEntry[] {
+  const fixed: CoinEntry[] = config.fixedCoins.map(c => ({ id: c.id, symbol: c.symbol, origin: 'fixed' as const }))
+  if (!config.trendingEnabled) return fixed
+  const fixedIds = new Set(fixed.map(c => c.id))
+  const excluded = new Set(config.excludedCoins)
+  const trending = selectTrending(trendingRaw, fixedIds, excluded, config.trendingLimit)
+  return [...fixed, ...trending.map(t => ({ id: t.id, symbol: t.symbol, origin: 'trending' as const }))]
+}
+
 type BoardProps = {
   quotes: QuoteRow[]
-  columns: 1 | 2
   sortKey: SortKey
   sorted: boolean
   highlight: boolean
@@ -290,8 +400,9 @@ type BoardProps = {
  * Sorts, pages, and works out which visible rows just turned - either the
  * whole page (a page or sort change, within PAGE_TURN_WINDOW_MS) or just the
  * rows whose coin changed occupant (a rank cross with no accompanying page
- * turn, e.g. two coins swapping places under the 24h% sort). Ported from
- * tw-stock-mod's buildProps, stripped of everything market/session-specific.
+ * turn, e.g. two coins swapping places under the 24h% sort, or the trending
+ * list rotating a coin out from under a page). Ported from tw-stock-mod's
+ * buildProps, stripped of everything market/session-specific.
  */
 function buildProps(now: number): BoardProps {
   const sortKey = sortOverride ?? config.sort
@@ -299,14 +410,12 @@ function buildProps(now: number): BoardProps {
   if (sortKey === 'change24h') ranked.sort((a, b) => b.pct24h - a.pct24h)
   else if (sortKey === 'change1h') ranked.sort((a, b) => b.pct1h - a.pct1h)
   else if (sortKey === 'volume') ranked.sort((a, b) => b.volume24h - a.volume24h)
-  // 'list': no sort - `quotes` is already in config.coins order
+  // 'list': no sort - `quotes` is already in activeCoins() order
 
-  const columns = effectiveColumns(config, ranked.length)
-  const perPage = pageSize(columns)
-  const pages = Math.max(1, Math.ceil(ranked.length / perPage))
+  const pages = Math.max(1, Math.ceil(ranked.length / PAGE_SIZE))
   lastPageCount = pages
   const pageIdx = ((page % pages) + pages) % pages
-  const shown = ranked.slice(pageIdx * perPage, pageIdx * perPage + perPage)
+  const shown = ranked.slice(pageIdx * PAGE_SIZE, pageIdx * PAGE_SIZE + PAGE_SIZE)
 
   const wasOf = (before: QuoteRow) => ({
     price: before.price,
@@ -327,12 +436,13 @@ function buildProps(now: number): BoardProps {
   } else {
     // No page turn is running, but a row's OCCUPANT can still change: with
     // `sortKey !== 'list'` the list re-sorts every render, so two coins
-    // crossing rank moves one of them into a slot with no page turn to
-    // explain it. Comparing this render's row at position i against what
-    // `lastShown` actually drew there catches that. A row whose occupant did
-    // NOT change keeps whatever price-only `was` applyQuotes already
-    // attached (see feedOnce), so a price update and a rank cross can both
-    // turn the same row without stepping on each other.
+    // crossing rank (or the trending list swapping one coin for another)
+    // moves a new coin into a slot with no page turn to explain it.
+    // Comparing this render's row at position i against what `lastShown`
+    // actually drew there catches that. A row whose occupant did NOT change
+    // keeps whatever price-only `was` applyQuotes already attached (see
+    // feedOnce), so a price update and a rank cross can both turn the same
+    // row without stepping on each other.
     let ranksCrossed = false
     for (let i = 0; i < shown.length; i++) {
       const before = lastShown[i]
@@ -346,7 +456,6 @@ function buildProps(now: number): BoardProps {
 
   return {
     quotes: shown,
-    columns,
     sortKey,
     sorted: sortKey !== 'list',
     highlight: config.highlight,
@@ -409,7 +518,7 @@ export const register: Register = on => {
     // once immediately so the band is there on the first prompt, then on the
     // refresh interval the config asked for. The interval is fixed for the
     // session: changing refreshMs later needs /reload-plugins - same
-    // limitation feedMs has below.
+    // limitation feedMs and trendingRefreshMs have below.
     await poll().catch(err => $.ui.log(`crypto-band-mod: poll failed: ${err}`))
     $.clock.every(config.refreshMs, () => {
       poll().catch(err => $.ui.log(`crypto-band-mod: poll failed: ${err}`))
@@ -429,11 +538,11 @@ export const register: Register = on => {
       $.ui.invalidate('ui.render')
     }
 
-    /** merges a successful CoinGecko answer into `quotes`, config.coins order, carrying `was` for whatever coin's price actually moved */
-    const applyQuotes = (parsed: Record<string, MarketsRow>) => {
+    /** merges a successful CoinGecko answer into `quotes`, activeCoins() order, carrying `was` for whatever coin's price actually moved */
+    const applyQuotes = (parsed: Record<string, MarketsRow>, coins: CoinEntry[]) => {
       const next: QuoteRow[] = []
       const unmapped: string[] = []
-      for (const coin of config.coins) {
+      for (const coin of coins) {
         const p = parsed[coin.id]
         const prevRow = quotes.find(q => q.id === coin.id)
         if (!p) {
@@ -449,6 +558,7 @@ export const register: Register = on => {
         next.push({
           id: coin.id,
           symbol,
+          origin: coin.origin,
           price: p.price,
           pct1h: p.pct1h,
           pct24h: p.pct24h,
@@ -466,7 +576,8 @@ export const register: Register = on => {
     }
 
     const feedOnce = async (now: number) => {
-      const ids = config.coins.map(c => c.id)
+      const coins = activeCoins()
+      const ids = coins.map(c => c.id)
       if (ids.length === 0) return
       const url = `${COINGECKO_MARKETS_URL}?vs_currency=usd&ids=${encodeURIComponent(ids.join(','))}&price_change_percentage=1h,24h&_=${now}`
       let res: { ok: boolean; status: number; text: string }
@@ -491,7 +602,7 @@ export const register: Register = on => {
       feedSeq += 1
       turnSeq += 1
       nextFeedAt = now + feedInterval(config)
-      applyQuotes(parsed)
+      applyQuotes(parsed, coins)
       $.ui.invalidate('ui.render')
     }
 
@@ -512,6 +623,49 @@ export const register: Register = on => {
     await feed().catch(err => $.ui.log(`crypto-band-mod: feed failed: ${err}`))
     $.clock.every(feedInterval(config), () => {
       feed().catch(err => $.ui.log(`crypto-band-mod: feed failed: ${err}`))
+    })
+
+    // The trending list rides its own, much slower clock - "熱門名單每 10
+    // 分鐘更新一次，不可每次 UI 重繪都請求 API": a UI redraw (buildProps) or
+    // even a coins/markets tick never triggers a `search/trending` request,
+    // only this timer does. A failed attempt just leaves `trendingRaw` (and
+    // therefore the board) exactly as it was - see parseTrending's contract.
+    const trendingFeedOnce = async () => {
+      let res: { ok: boolean; status: number; text: string }
+      try {
+        res = await $.http.fetch(COINGECKO_TRENDING_URL)
+      } catch (err) {
+        $.ui.log(`crypto-band-mod: trending feed network error (${err}), keeping last trending list`)
+        return
+      }
+      if (!res.ok) {
+        $.ui.log(`crypto-band-mod: trending feed HTTP ${res.status}, keeping last trending list`)
+        return
+      }
+      const parsed = parseTrending(res.text)
+      if (!parsed) {
+        $.ui.log('crypto-band-mod: trending feed answered nothing usable, keeping last trending list')
+        return
+      }
+      trendingRaw = parsed
+      $.ui.invalidate('ui.render')
+    }
+
+    const trendingFeed = async () => {
+      if (!config.trendingEnabled) return
+      const now = await $.clock.now()
+      if (now < snoozedUntil || trendingInFlight) return
+      trendingInFlight = true
+      try {
+        await trendingFeedOnce()
+      } finally {
+        trendingInFlight = false
+      }
+    }
+
+    await trendingFeed().catch(err => $.ui.log(`crypto-band-mod: trending feed failed: ${err}`))
+    $.clock.every(config.trendingRefreshMs, () => {
+      trendingFeed().catch(err => $.ui.log(`crypto-band-mod: trending feed failed: ${err}`))
     })
 
     return r
@@ -542,7 +696,6 @@ export const register: Register = on => {
       )
     }
 
-    const cols = e.viewport?.columns ?? e.props.bodyColumns ?? 80
     const props = buildProps(now)
 
     const onPage = () => {
@@ -586,7 +739,7 @@ export const register: Register = on => {
             <Button key="crypto-band:snooze" label="收起 30分" onPress={onSnooze} />
           </Box>
         </Box>
-        <Client key="crypto-band:table" module="./board.tsx" width={cols} height={TABLE_BOARD_ROWS} props={{ ...props }} />
+        <Client key="crypto-band:table" module="./board.tsx" width={e.viewport?.columns ?? e.props.bodyColumns ?? 80} height={TABLE_BOARD_ROWS} props={{ ...props }} />
         {await doNext(e)}
       </Box>
     )
