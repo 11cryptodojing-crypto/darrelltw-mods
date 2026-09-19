@@ -1,0 +1,21 @@
+{
+  "name": "crypto-band-mod",
+  "version": "0.1.0",
+  "description": "Crypto watchlist band above the Claude Code prompt: BTC/ETH/SOL/HYPE (configurable via any CoinGecko coin id) in a broker-style table with a live 幣種/價格/1h%/24h%/24h量 view, green up / red down. Crypto trades 24/7, so there is no market session, no timezone switching, and no market-select control - one table, always on. Prices come from CoinGecko's public coins/markets endpoint, no key and no account, polled at least every 30s. A failed request never invents a price: the last successful snapshot stays on screen, flagged 資料延遲, until the feed recovers. Needs function hooks (early access) and an interactive terminal. Zero model tokens.",
+  "author": {
+    "name": "Darrell Wang",
+    "email": "info@darrelltw.com",
+    "url": "https://x.com/darrell_tw_"
+  },
+  "license": "MIT",
+  "keywords": [
+    "crypto",
+    "watchlist",
+    "bitcoin",
+    "coingecko",
+    "tui",
+    "function-hooks",
+    "above-prompt",
+    "split-flap"
+  ]
+}

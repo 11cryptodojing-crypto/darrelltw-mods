@@ -1,0 +1,24 @@
+{
+  "_comment": "Optional: copy to <project>/.claude/crypto-band.json. Every key has a default, so a partial file is fine.",
+  "_coins_comment": "CoinGecko coin ids (never a ticker like BTC - see https://api.coingecko.com/api/v3/coins/list for the full id list). `symbol` is optional and overrides what the table shows in the 幣種 column; left out, it uses CoinGecko's own symbol for that id (already BTC/ETH/SOL/HYPE for the four below).",
+  "coins": [
+    { "id": "bitcoin" },
+    { "id": "ethereum" },
+    { "id": "solana" },
+    { "id": "hyperliquid" }
+  ],
+  "_sort_comment": "\"change24h\" (default) ranks by 24h%, \"change1h\" by 1h%, \"volume\" by 24h成交量, \"list\" leaves the coins list's own order alone. The 排序 button cycles through all four at runtime; this just picks the starting one.",
+  "sort": "change24h",
+  "highlight": true,
+  "_columns_comment": "\"auto\" (default) draws one coin a row for 5 coins or fewer, two coins a row for 6+; an explicit 1 or 2 always wins.",
+  "columns": "auto",
+  "_feedMs_comment": "Milliseconds between CoinGecko requests. Clamped to 30000 minimum no matter what this says - crypto-band-mod never polls a public API faster than once every 30s.",
+  "feedMs": 30000,
+  "_pageMs_comment": "How long one page holds before 翻頁 auto-advances, in ms. 0 turns auto-paging off (the 翻頁 button still works by hand).",
+  "pageMs": 10000,
+  "_refreshMs_comment": "How often this module re-reads this file and re-renders. Has nothing to do with how often CoinGecko is polled - see feedMs.",
+  "refreshMs": 3000,
+  "_animation_comment": "\"full\" (default) flaps rows on a value change and steps the live dot; \"off\" leaves the board still and only repaints once a second for the countdown.",
+  "animation": "full",
+  "countdown": true
+}
